@@ -2,20 +2,20 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, ChevronDown, Clock, FileImage, FolderOpen, Loader2, RotateCcw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { ArrowLeft, ChevronDown, Clock, FileImage, FolderOpen, Loader2, RotateCcw, Trash2 } from "lucide-react";
 import { FolderCoverVisual } from "@/components/photographer/folder-cover-visual";
 import {
   FoldersApiError,
   formatRestoreBeforeLabel,
   getFolderClientName,
   getFolderCoverUrl,
-  isRestoreDeadlinePassed,
   listFoldersMediaTrash,
   listFoldersTrash,
   purgeFoldersTrash,
   restoreFolderFromTrash,
   restoreFolderTrashedMedia,
+  restoreFoldersTrash,
   type ListFoldersTrashResponse,
   type TrashFolderRow,
   type TrashMediaRow,
@@ -23,10 +23,119 @@ import {
 import { listClients } from "@/lib/clients-api";
 import { getSettings, getSettingsDefaultCoverUrl } from "@/lib/settings-api";
 import { useToast } from "@/components/toast-provider";
+import {
+  DashboardPageHeader,
+  dashboardPageHeaderDescriptionClassName,
+  dashboardPageHeaderTitleClassName,
+} from "@/components/dashboard/dashboard-page-header";
 import { cn } from "@/lib/utils";
 
 function trashMediaKey(row: TrashMediaRow): string {
   return `${row.folderId}:${row.mediaId}`;
+}
+
+function trashKindMeta(kindRaw: string): { label: string; badgeClass: string } {
+  const kind = (kindRaw || "file").toLowerCase().trim();
+  const isFinalKind = /^finals?$/.test(kind);
+  const isOriginalKind =
+    kind === "raw" ||
+    kind === "original" ||
+    kind === "originals" ||
+    kind === "upload" ||
+    kind === "uploads";
+  const label = isOriginalKind
+    ? "Original"
+    : isFinalKind
+      ? "Final"
+      : kindRaw
+        ? kindRaw.charAt(0).toUpperCase() + kindRaw.slice(1)
+        : "File";
+  const badgeClass = isFinalKind
+    ? "border-brand/30 bg-brand/10 text-brand-ink dark:border-brand/40 dark:bg-brand/15 dark:text-brand-on-dark"
+    : isOriginalKind
+      ? "border-brand/20 bg-brand-soft/70 text-brand-ink dark:border-brand/30 dark:bg-brand/10 dark:text-brand-on-dark"
+      : "border-zinc-200 bg-zinc-50 text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300";
+  return { label, badgeClass };
+}
+
+function TrashSectionShell({
+  title,
+  count,
+  allSelected,
+  onToggleSelectAll,
+  selectDisabled,
+  children,
+}: {
+  title: string;
+  count: number;
+  allSelected: boolean;
+  onToggleSelectAll: () => void;
+  selectDisabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <section className="overflow-hidden rounded-xl border border-zinc-200/90 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-100 bg-zinc-50/90 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900/50 sm:px-4">
+        <div className="flex min-w-0 items-center gap-2">
+          <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-zinc-700 dark:text-zinc-200">
+            {title}
+          </h2>
+          <span className="rounded-full bg-zinc-200/80 px-2 py-0.5 text-[10px] font-semibold tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+            {count}
+          </span>
+        </div>
+        <label className="inline-flex cursor-pointer select-none items-center gap-1.5 rounded-md px-1 py-0.5 text-[11px] font-medium text-zinc-600 transition hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200">
+          <input
+            type="checkbox"
+            checked={allSelected}
+            disabled={selectDisabled}
+            onChange={onToggleSelectAll}
+            className="h-3.5 w-3.5 rounded border-zinc-300 text-brand focus:ring-brand disabled:opacity-40"
+          />
+          All
+        </label>
+      </div>
+      <ul className="divide-y divide-zinc-100 dark:divide-zinc-800">{children}</ul>
+    </section>
+  );
+}
+
+function TrashRestoreButton({
+  busy,
+  disabled,
+  onClick,
+  label,
+  compact,
+}: {
+  busy: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  label: string;
+  compact?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled || busy}
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className={cn(
+        "inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border font-semibold transition",
+        compact ? "h-8 w-8" : "h-8 px-2.5 text-[11px]",
+        disabled || busy
+          ? "cursor-not-allowed border-zinc-200 bg-zinc-50 text-zinc-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-600"
+          : "border-brand/25 bg-brand-soft/50 text-brand-ink hover:border-brand/40 hover:bg-brand-soft dark:border-brand/35 dark:bg-brand/10 dark:text-brand-on-dark dark:hover:bg-brand/20",
+      )}
+    >
+      {busy ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+      ) : (
+        <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+      )}
+      {!compact ? <span>{busy ? "…" : "Restore"}</span> : null}
+    </button>
+  );
 }
 
 export default function GalleriesTrashPage() {
@@ -42,9 +151,10 @@ export default function GalleriesTrashPage() {
   const [restoringId, setRestoringId] = useState<string | null>(null);
   const [restoringMediaKey, setRestoringMediaKey] = useState<string | null>(null);
   const [purging, setPurging] = useState(false);
-  /** Gallery folder ids selected for permanent purge (`folder._id`). */
+  const [restoringSelected, setRestoringSelected] = useState(false);
+  /** Gallery folder ids selected for bulk restore or permanent delete. */
   const [selectedFolderIds, setSelectedFolderIds] = useState<string[]>([]);
-  /** Keys `folderId:mediaId` for file-level trash selected for purge. */
+  /** Keys `folderId:mediaId` for file-level bulk actions. */
   const [selectedMediaKeys, setSelectedMediaKeys] = useState<string[]>([]);
   const [studioDefaultCoverUrl, setStudioDefaultCoverUrl] = useState<string | null>(null);
 
@@ -120,6 +230,8 @@ export default function GalleriesTrashPage() {
   }, [data, extraMediaRows]);
 
   const selectedCount = selectedFolderIds.length + selectedMediaKeys.length;
+  const batchBusy = purging || restoringSelected;
+  const rowBusy = batchBusy || restoringId !== null || restoringMediaKey !== null;
 
   const allFoldersSelected = useMemo(() => {
     if (!data?.folders.length) return false;
@@ -192,7 +304,7 @@ export default function GalleriesTrashPage() {
 
   async function onRestore(row: TrashFolderRow) {
     const id = row.folder._id;
-    if (restoringId || isRestoreDeadlinePassed(row.restoreBefore)) return;
+    if (restoringId || batchBusy) return;
     setRestoringId(id);
     try {
       await restoreFolderFromTrash(id);
@@ -225,7 +337,7 @@ export default function GalleriesTrashPage() {
 
   async function onRestoreMedia(row: TrashMediaRow) {
     const key = trashMediaKey(row);
-    if (restoringMediaKey || isRestoreDeadlinePassed(row.restoreBefore)) return;
+    if (restoringMediaKey || batchBusy) return;
     setRestoringMediaKey(key);
     try {
       await restoreFolderTrashedMedia(row.folderId, row.mediaId);
@@ -260,11 +372,11 @@ export default function GalleriesTrashPage() {
     }
   }
 
-  function toggleFolderForPurge(id: string) {
+  function toggleFolderSelection(id: string) {
     setSelectedFolderIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
 
-  function toggleMediaKeyForPurge(key: string) {
+  function toggleMediaSelection(key: string) {
     setSelectedMediaKeys((prev) => (prev.includes(key) ? prev.filter((x) => x !== key) : [...prev, key]));
   }
 
@@ -286,13 +398,51 @@ export default function GalleriesTrashPage() {
     }
   }
 
-  function clearPurgeSelection() {
+  function clearSelection() {
     setSelectedFolderIds([]);
     setSelectedMediaKeys([]);
   }
 
+  async function onRestoreSelectedTrash() {
+    if (batchBusy || selectedCount === 0) return;
+    setRestoringSelected(true);
+    try {
+      const mediaIds = selectedMediaKeys.map((key) => {
+        const i = key.indexOf(":");
+        return i >= 0 ? key.slice(i + 1) : key;
+      });
+      const result = await restoreFoldersTrash({
+        folderIds: [...selectedFolderIds],
+        mediaIds,
+      });
+      clearSelection();
+      await load();
+      const parts: string[] = [];
+      if (result.restoredFolderCount) parts.push(`${result.restoredFolderCount} gallery/galleries`);
+      if (result.restoredMediaCount) parts.push(`${result.restoredMediaCount} file(s)`);
+      showToast(
+        parts.length ? `Restored ${parts.join(" and ")}.` : result.message,
+        "success",
+      );
+    } catch (e) {
+      showToast(
+        e instanceof FoldersApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Could not restore selected items.",
+        "error",
+      );
+      if (e instanceof FoldersApiError && e.status === 410) {
+        await load();
+      }
+    } finally {
+      setRestoringSelected(false);
+    }
+  }
+
   async function onPurgeAllTrash() {
-    if (purging || !data) return;
+    if (batchBusy || !data) return;
     const confirmed = window.confirm(
       "Permanently delete everything in trash?\n\nThis cannot be undone. All trashed galleries and files are removed from the server immediately. The restore window does not apply.\n\nOnly choose OK if you are certain.",
     );
@@ -308,7 +458,7 @@ export default function GalleriesTrashPage() {
         msg += ` ${result.skipped.length} item(s) skipped.`;
       }
       showToast(msg, result.skipped?.length ? "info" : "success");
-      clearPurgeSelection();
+      clearSelection();
       await load();
     } catch (e) {
       showToast(
@@ -325,7 +475,7 @@ export default function GalleriesTrashPage() {
   }
 
   async function onPurgeSelectedTrash() {
-    if (purging) return;
+    if (batchBusy) return;
     const nFolders = selectedFolderIds.length;
     const nMedia = selectedMediaKeys.length;
     if (nFolders === 0 && nMedia === 0) return;
@@ -352,7 +502,7 @@ export default function GalleriesTrashPage() {
         msg += ` ${result.skipped.length} skipped.${first ? ` (${first})` : ""}`;
       }
       showToast(msg, result.skipped?.length ? "info" : "success");
-      clearPurgeSelection();
+      clearSelection();
       await load();
     } catch (e) {
       showToast(
@@ -373,7 +523,7 @@ export default function GalleriesTrashPage() {
   const fullyEmpty = data && !hasFolderTrash && !hasMediaTrash;
 
   return (
-    <div className="dashboard-page space-y-6">
+    <div className="dashboard-page space-y-4">
       <Link
         href="/dashboard/galleries"
         className="inline-flex items-center gap-2 text-sm font-medium text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
@@ -382,69 +532,82 @@ export default function GalleriesTrashPage() {
         Back to galleries
       </Link>
 
-      <section className="relative overflow-hidden rounded-2xl border border-slate-800/50 bg-gradient-to-br from-slate-950 via-indigo-950/85 to-slate-900 shadow-lg shadow-slate-900/20">
-        <div
-          className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-brand/15 blur-3xl"
-          aria-hidden
-        />
-        <div className="relative flex flex-col gap-4 p-5 sm:flex-row sm:items-start sm:justify-between sm:p-6">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-[1.65rem]">
-              Trash
-            </h1>
-            <p className="mt-2 max-w-xl text-sm leading-relaxed text-slate-400">
-              Trashed galleries and files can be restored until each row&apos;s deadline.
-              {data != null && data.retentionDays > 0 ? (
-                <span className="mt-2 block text-xs text-slate-500">
-                  Default window: {data.retentionDays} days.
-                </span>
-              ) : null}
-            </p>
-          </div>
-          {data && !fullyEmpty ? (
-            <div className="flex shrink-0 flex-wrap gap-2">
-              <button
-                type="button"
-                disabled={purging || restoringId !== null || restoringMediaKey !== null}
-                onClick={() => void onPurgeAllTrash()}
-                className={cn(
-                  "inline-flex min-h-9 items-center justify-center rounded-xl border border-red-400/40 bg-red-500/20 px-3 py-2 text-xs font-semibold text-red-100 transition",
-                  "hover:bg-red-500/30 disabled:cursor-not-allowed disabled:opacity-45",
-                )}
-              >
-                {purging ? "Purging…" : "Empty trash"}
-              </button>
-              {selectedCount > 0 ? (
-                <button
-                  type="button"
-                  disabled={purging || restoringId !== null || restoringMediaKey !== null}
-                  onClick={() => void onPurgeSelectedTrash()}
-                  className={cn(
-                    "inline-flex min-h-9 items-center justify-center rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-xs font-semibold text-white transition",
-                    "hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-45",
-                  )}
-                >
-                  Purge selected ({selectedCount})
-                </button>
-              ) : null}
-            </div>
-          ) : null}
+      <DashboardPageHeader innerClassName="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <h1 className={dashboardPageHeaderTitleClassName()}>Trash</h1>
+          <p className={dashboardPageHeaderDescriptionClassName()}>
+            Trashed galleries and files can be restored until each row&apos;s deadline. Items past
+            the retention window are removed automatically.
+            {data != null && data.retentionDays > 0 ? (
+              <span className="mt-2 block text-xs text-zinc-500 dark:text-zinc-500">
+                Default window: {data.retentionDays} days.
+              </span>
+            ) : null}
+          </p>
         </div>
-      </section>
+        {data && !fullyEmpty ? (
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={rowBusy}
+              onClick={() => void onPurgeAllTrash()}
+              className={cn(
+                "inline-flex min-h-9 items-center justify-center rounded-full border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 transition",
+                "hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-red-400/40 dark:bg-red-500/15 dark:text-red-100 dark:hover:bg-red-500/25",
+              )}
+            >
+              {purging ? "Deleting…" : "Empty trash"}
+            </button>
+          </div>
+        ) : null}
+      </DashboardPageHeader>
 
       {data && !fullyEmpty && selectedCount > 0 ? (
-        <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-zinc-200/85 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950">
-          <button
-            type="button"
-            disabled={purging}
-            onClick={clearPurgeSelection}
-            className="inline-flex min-h-9 items-center justify-center rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-900 disabled:opacity-45"
-          >
-            Clear selection
-          </button>
-          <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-            Selected items will be permanently deleted, not moved to another folder.
-          </span>
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-zinc-200/90 bg-zinc-50/90 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900/50 sm:px-4">
+          <p className="min-w-0 text-xs text-zinc-600 dark:text-zinc-400">
+            <span className="font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">{selectedCount}</span>{" "}
+            selected
+          </p>
+          <div className="flex shrink-0 items-center gap-0.5">
+            <button
+              type="button"
+              disabled={batchBusy}
+              onClick={() => void onRestoreSelectedTrash()}
+              className="inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-semibold text-zinc-800 transition hover:bg-white disabled:opacity-45 dark:text-zinc-100 dark:hover:bg-zinc-800"
+            >
+              {restoringSelected ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+              ) : (
+                <RotateCcw className="h-3.5 w-3.5 opacity-70" aria-hidden />
+              )}
+              Restore
+            </button>
+            <span className="text-zinc-300 dark:text-zinc-600" aria-hidden>
+              ·
+            </span>
+            <button
+              type="button"
+              disabled={batchBusy}
+              onClick={() => void onPurgeSelectedTrash()}
+              className="inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-xs font-semibold text-red-600 transition hover:bg-red-50 disabled:opacity-45 dark:text-red-400 dark:hover:bg-red-950/40"
+            >
+              {purging ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+              ) : (
+                <Trash2 className="h-3.5 w-3.5 opacity-80" aria-hidden />
+              )}
+              Delete
+            </button>
+            <span className="mx-0.5 hidden h-4 w-px bg-zinc-200 sm:block dark:bg-zinc-700" aria-hidden />
+            <button
+              type="button"
+              disabled={batchBusy}
+              onClick={clearSelection}
+              className="rounded-md px-2 py-1.5 text-xs font-medium text-zinc-500 transition hover:text-zinc-800 disabled:opacity-45 dark:text-zinc-400 dark:hover:text-zinc-200"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       ) : null}
 
@@ -475,328 +638,180 @@ export default function GalleriesTrashPage() {
       ) : null}
 
       {data && hasFolderTrash ? (
-        <div className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Galleries in trash</h2>
-            <button
-              type="button"
-              disabled={purging || data.folders.length === 0}
-              onClick={toggleSelectAllFolders}
-              className="text-xs font-semibold text-brand-ink hover:text-brand dark:text-brand-on-dark dark:hover:text-brand disabled:opacity-40"
-            >
-              {allFoldersSelected ? "Deselect all" : "Select all"}
-            </button>
-          </div>
-          <ul className="gallery-card-grid">
-            {data.folders.map((row) => {
-              const folder = row.folder;
-              const clientName = getFolderClientName(folder, clientNameById);
-              const title = folder.eventName?.trim() || clientName;
-              const expired = isRestoreDeadlinePassed(row.restoreBefore);
-              const deadlineLabel = formatRestoreBeforeLabel(row.restoreBefore);
-              const busy = restoringId === folder._id;
-              const checked = selectedFolderIds.includes(folder._id);
+        <TrashSectionShell
+          title="Galleries"
+          count={data.folders.length}
+          allSelected={allFoldersSelected}
+          onToggleSelectAll={toggleSelectAllFolders}
+          selectDisabled={rowBusy || data.folders.length === 0}
+        >
+          {data.folders.map((row) => {
+            const folder = row.folder;
+            const clientName = getFolderClientName(folder, clientNameById);
+            const title = folder.eventName?.trim() || clientName;
+            const deadlineLabel = formatRestoreBeforeLabel(row.restoreBefore);
+            const busy = restoringId === folder._id;
+            const checked = selectedFolderIds.includes(folder._id);
 
-              return (
-                <li
-                  key={folder._id}
-                  className="flex flex-col overflow-hidden rounded-xl border border-zinc-200/80 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950"
-                >
-                  <div className="relative aspect-[5/3] w-full overflow-hidden bg-zinc-100 dark:bg-zinc-800/50">
-                    <label className="absolute right-2 top-2 z-10 flex cursor-pointer items-center justify-center rounded-md bg-white/95 p-1 shadow dark:bg-zinc-900/95">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={purging}
-                        onChange={() => toggleFolderForPurge(folder._id)}
-                        className="h-3.5 w-3.5 rounded border-zinc-300 text-brand focus:ring-brand"
-                        aria-label={`Select gallery for permanent deletion: ${title}`}
-                      />
-                    </label>
-                    <FolderCoverVisual
-                      folder={folder}
-                      studioDefaultCoverUrl={studioDefaultCoverUrl}
-                      imgClassName="h-full w-full object-cover"
-                    />
-                    {expired ? (
-                      <span className="absolute left-2 top-2 rounded-md bg-black/75 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-white">
-                        Expired
-                      </span>
+            return (
+              <li
+                key={folder._id}
+                className="flex items-center gap-2.5 px-3 py-2 transition-colors hover:bg-zinc-50/90 dark:hover:bg-zinc-900/40 sm:gap-3 sm:px-4 sm:py-2.5"
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  disabled={rowBusy}
+                  onChange={() => toggleFolderSelection(folder._id)}
+                  className="h-3.5 w-3.5 shrink-0 rounded border-zinc-300 text-brand focus:ring-brand"
+                  aria-label={`Select gallery: ${title}`}
+                />
+                <div className="relative h-10 w-14 shrink-0 overflow-hidden rounded-md bg-zinc-100 ring-1 ring-zinc-200/80 dark:bg-zinc-800 dark:ring-zinc-700 sm:h-11 sm:w-[4.5rem]">
+                  <FolderCoverVisual
+                    folder={folder}
+                    studioDefaultCoverUrl={studioDefaultCoverUrl}
+                    imgClassName="h-full w-full object-cover"
+                  />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-50">{title}</p>
+                  <p className="mt-0.5 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                    {clientName}
+                    {deadlineLabel ? (
+                      <>
+                        <span className="mx-1.5 text-zinc-300 dark:text-zinc-600">·</span>
+                        <Clock className="mr-0.5 inline h-3 w-3 -translate-y-px opacity-60" aria-hidden />
+                        <span className="tabular-nums">Restore by {deadlineLabel}</span>
+                      </>
                     ) : null}
-                  </div>
-                  <div className="flex flex-1 flex-col gap-3 p-4">
-                    <div className="min-w-0">
-                      <h3 className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-                        {title}
-                      </h3>
-                      <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">{clientName}</p>
-                    </div>
-                    <p className="text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-400">
-                      {deadlineLabel ? (
-                        <>
-                          <span className="font-medium text-zinc-800 dark:text-zinc-200">Restore by:</span>{" "}
-                          {deadlineLabel}
-                        </>
-                      ) : (
-                        "Restore deadline not provided."
-                      )}
-                    </p>
-                    {expired ? (
-                      <p className="text-[11px] text-amber-800 dark:text-amber-200/90">
-                        The retention window has passed. This gallery can no longer be restored from the app.
-                      </p>
-                    ) : null}
-                    <button
-                      type="button"
-                      disabled={expired || busy || purging}
-                      onClick={() => void onRestore(row)}
-                      className={cn(
-                        "mt-auto inline-flex min-h-10 items-center justify-center rounded-lg px-4 text-sm font-semibold transition",
-                        expired || busy || purging
-                          ? "cursor-not-allowed bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-600"
-                          : "bg-brand text-white hover:bg-brand-hover",
-                      )}
-                    >
-                      {busy ? "Restoring…" : "Restore gallery"}
-                    </button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
+                  </p>
+                </div>
+                <TrashRestoreButton
+                  busy={busy}
+                  disabled={rowBusy}
+                  onClick={() => void onRestore(row)}
+                  label={`Restore gallery ${title}`}
+                  compact
+                />
+              </li>
+            );
+          })}
+        </TrashSectionShell>
       ) : null}
 
       {data && hasMediaTrash ? (
-        <section className="overflow-hidden rounded-3xl border border-zinc-200/90 bg-white shadow-[0_2px_24px_-8px_rgba(0,0,0,0.08)] dark:border-zinc-800/90 dark:bg-zinc-950 dark:shadow-[0_2px_32px_-8px_rgba(0,0,0,0.4)]">
-          <div className="relative border-b border-zinc-100/90 bg-gradient-to-br from-brand-soft/55 via-white to-white px-5 py-5 dark:border-zinc-800 dark:from-brand/10 dark:via-zinc-950 dark:to-zinc-950 sm:px-6 sm:py-6">
-            <div className="pointer-events-none absolute -right-20 -top-16 h-40 w-40 rounded-full bg-brand/[0.12] blur-3xl dark:bg-brand/10" aria-hidden />
-            <div className="relative flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-              <div className="min-w-0 space-y-1">
-                <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-brand-ink dark:text-brand-on-dark">
-                  Media
-                </p>
-                <h2 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-50 sm:text-xl">
-                  Files in trash
-                </h2>
-                <p className="max-w-xl text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
-                  Restore until each deadline. Files go back to their gallery.
-                </p>
-              </div>
-              <div className="flex shrink-0 flex-col items-end gap-2 sm:items-end">
-                <div className="flex flex-wrap items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    disabled={purging || allTrashedMedia.length === 0}
-                    onClick={toggleSelectAllMedia}
-                    className="text-xs font-semibold text-brand-ink hover:text-brand dark:text-brand-on-dark dark:hover:text-brand disabled:opacity-40"
-                  >
-                    {allMediaSelected ? "Deselect all files" : "Select all files"}
-                  </button>
-                  <span
-                    className={cn(
-                      "inline-flex items-center rounded-full border border-brand/20 bg-brand-soft/80 px-3 py-1 text-xs font-semibold tabular-nums shadow-sm backdrop-blur-sm",
-                      "text-brand-ink dark:border-brand/35 dark:bg-brand/15 dark:text-brand-on-dark",
-                    )}
-                  >
-                    {allTrashedMedia.length}
-                    <span className="mx-1 font-normal text-brand/45 dark:text-brand-on-dark/45">/</span>
-                    {data.deletedMediaTotal}
-                  </span>
+        <TrashSectionShell
+          title="Files"
+          count={data.deletedMediaTotal}
+          allSelected={allMediaSelected}
+          onToggleSelectAll={toggleSelectAllMedia}
+          selectDisabled={rowBusy || allTrashedMedia.length === 0}
+        >
+          {allTrashedMedia.map((row) => {
+            const folder = row.folder;
+            const clientName = folder ? getFolderClientName(folder, clientNameById) : "";
+            const galleryTitle =
+              folder?.eventName?.trim() || clientName || `Gallery ${row.folderId.slice(-6)}`;
+            const previewSrc =
+              row.thumbUrl ?? row.url ?? (folder ? getFolderCoverUrl(folder) : null) ?? "";
+            const label = row.originalFilename?.trim() || row.mediaId;
+            const deadlineLabel = formatRestoreBeforeLabel(row.restoreBefore);
+            const busy = restoringMediaKey === trashMediaKey(row);
+            const { label: kindLabel, badgeClass: kindBadgeClass } = trashKindMeta(row.kind || "file");
+            const mkey = trashMediaKey(row);
+            const mediaChecked = selectedMediaKeys.includes(mkey);
+
+            return (
+              <li
+                key={mkey}
+                className="flex items-center gap-2.5 px-3 py-2 transition-colors hover:bg-zinc-50/90 dark:hover:bg-zinc-900/40 sm:gap-3 sm:px-4 sm:py-2.5"
+              >
+                <input
+                  type="checkbox"
+                  checked={mediaChecked}
+                  disabled={rowBusy}
+                  onChange={() => toggleMediaSelection(mkey)}
+                  className="h-3.5 w-3.5 shrink-0 rounded border-zinc-300 text-brand focus:ring-brand"
+                  aria-label={`Select file: ${label}`}
+                />
+                <div className="relative h-9 w-9 shrink-0 overflow-hidden rounded-md bg-zinc-100 ring-1 ring-zinc-200/80 dark:bg-zinc-800 dark:ring-zinc-700 sm:h-10 sm:w-10">
+                  {previewSrc ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={previewSrc} alt="" className="h-full w-full object-cover" loading="lazy" />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center">
+                      <FileImage className="h-4 w-4 text-zinc-400 dark:text-zinc-500" aria-hidden />
+                    </div>
+                  )}
                 </div>
-                <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">items</span>
-              </div>
-            </div>
-            {data.deletedMediaPagingHint && mediaNextPage !== null ? (
-              <p className="relative mt-3 text-xs text-zinc-500 dark:text-zinc-400">{data.deletedMediaPagingHint}</p>
-            ) : null}
-          </div>
-
-          <div className="bg-zinc-50/80 px-3 py-4 dark:bg-zinc-900/50 sm:px-5 sm:py-5">
-            <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5">
-              {allTrashedMedia.map((row) => {
-                const folder = row.folder;
-                const clientName = folder ? getFolderClientName(folder, clientNameById) : "";
-                const galleryTitle =
-                  folder?.eventName?.trim() ||
-                  clientName ||
-                  `Gallery ${row.folderId.slice(-6)}`;
-                const previewSrc =
-                  row.thumbUrl ??
-                  row.url ??
-                  (folder ? getFolderCoverUrl(folder) : null) ??
-                  "";
-                const label = row.originalFilename?.trim() || row.mediaId;
-                const expired = isRestoreDeadlinePassed(row.restoreBefore);
-                const deadlineLabel = formatRestoreBeforeLabel(row.restoreBefore);
-                const busy = restoringMediaKey === trashMediaKey(row);
-                const kindRaw = (row.kind || "file").toLowerCase().trim();
-                const isFinalKind = /^finals?$/.test(kindRaw);
-                const isOriginalKind =
-                  kindRaw === "raw" ||
-                  kindRaw === "original" ||
-                  kindRaw === "originals" ||
-                  kindRaw === "upload" ||
-                  kindRaw === "uploads";
-                const kindLabel = isOriginalKind
-                  ? "Original"
-                  : isFinalKind
-                    ? "Final"
-                    : row.kind
-                      ? row.kind.charAt(0).toUpperCase() + row.kind.slice(1)
-                      : "File";
-                const kindBadgeClass = isFinalKind
-                  ? "border-brand bg-brand text-brand-foreground shadow-sm dark:border-brand dark:bg-brand dark:text-brand-foreground"
-                  : isOriginalKind
-                    ? "border-brand/35 bg-brand-soft/95 text-brand-ink dark:border-brand/45 dark:bg-brand/14 dark:text-brand-on-dark"
-                    : "border-zinc-200/90 bg-white/90 text-zinc-700 dark:border-zinc-600 dark:bg-zinc-800/90 dark:text-zinc-200";
-                const mkey = trashMediaKey(row);
-                const mediaChecked = selectedMediaKeys.includes(mkey);
-
-                return (
-                  <li key={mkey} className="group/card h-full list-none">
-                    <div
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <p className="min-w-0 truncate text-sm font-medium text-zinc-900 dark:text-zinc-50" title={label}>
+                      {label}
+                    </p>
+                    <span
                       className={cn(
-                        "flex h-full flex-col overflow-hidden rounded-xl border bg-white transition-all duration-300 dark:bg-zinc-950",
-                        "border-zinc-200/85 shadow-[0_1px_3px_rgba(0,0,0,0.05)]",
-                        "hover:border-brand/30 hover:shadow-lg hover:shadow-brand/20 dark:border-zinc-800 dark:hover:border-brand/35 dark:hover:shadow-brand/15",
-                        expired && "opacity-80 grayscale-[0.35]",
+                        "shrink-0 rounded border px-1 py-px text-[9px] font-bold uppercase tracking-wide",
+                        kindBadgeClass,
                       )}
                     >
-                      <div
-                        className={cn(
-                          "relative aspect-video w-full overflow-hidden bg-gradient-to-br from-zinc-100 via-zinc-50 to-zinc-100 dark:from-zinc-800 dark:via-zinc-900 dark:to-zinc-800",
-                        )}
-                      >
-                        <label className="absolute right-2 top-2 z-20 flex cursor-pointer items-center justify-center rounded-md bg-white/95 p-1 shadow dark:bg-zinc-900/95">
-                          <input
-                            type="checkbox"
-                            checked={mediaChecked}
-                            disabled={purging}
-                            onChange={() => toggleMediaKeyForPurge(mkey)}
-                            className="h-3.5 w-3.5 rounded border-zinc-300 text-brand focus:ring-brand"
-                            aria-label={`Select file for permanent deletion: ${label}`}
-                          />
-                        </label>
-                        {previewSrc ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={previewSrc}
-                            alt=""
-                            className={cn(
-                              "h-full w-full object-cover transition duration-500 ease-out",
-                              "group-hover/card:scale-[1.02]",
-                            )}
-                            loading="lazy"
-                          />
-                        ) : (
-                          <div className="flex h-full w-full items-center justify-center">
-                            <FileImage
-                              className="h-7 w-7 text-zinc-300 transition group-hover/card:text-zinc-400 dark:text-zinc-600 dark:group-hover/card:text-zinc-500"
-                              aria-hidden
-                            />
-                          </div>
-                        )}
-                        <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-zinc-950/25 via-transparent to-zinc-950/[0.07] opacity-80 dark:from-zinc-950/50" />
-                        <div className="absolute left-2 top-2 flex flex-wrap gap-1">
-                          <span
-                            className={cn(
-                              "rounded-md border px-1.5 py-px text-[9px] font-bold uppercase tracking-wide shadow-sm",
-                              kindBadgeClass,
-                            )}
-                          >
-                            {kindLabel}
-                          </span>
-                          {expired ? (
-                            <span className="rounded-md border border-red-200/90 bg-red-600/95 px-1.5 py-px text-[9px] font-bold uppercase tracking-wide text-white shadow-sm dark:border-red-500/40">
-                              Expired
-                            </span>
-                          ) : null}
-                        </div>
-                      </div>
+                      {kindLabel}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                    <Link
+                      href={`/dashboard/folder/${row.folderId}`}
+                      className="inline-flex max-w-[min(100%,12rem)] items-center gap-0.5 font-medium text-brand-ink hover:text-brand dark:text-brand-on-dark dark:hover:text-brand"
+                    >
+                      <FolderOpen className="h-3 w-3 shrink-0 opacity-70" aria-hidden />
+                      <span className="truncate">{galleryTitle}</span>
+                    </Link>
+                    {deadlineLabel ? (
+                      <>
+                        <span className="text-zinc-300 dark:text-zinc-600">·</span>
+                        <span className="inline-flex items-center gap-0.5 tabular-nums">
+                          <Clock className="h-3 w-3 opacity-60" aria-hidden />
+                          {deadlineLabel}
+                        </span>
+                      </>
+                    ) : null}
+                  </p>
+                </div>
+                <TrashRestoreButton
+                  busy={busy}
+                  disabled={rowBusy}
+                  onClick={() => void onRestoreMedia(row)}
+                  label={`Restore ${label}`}
+                  compact
+                />
+              </li>
+            );
+          })}
+        </TrashSectionShell>
+      ) : null}
 
-                      <div className="flex flex-1 flex-col gap-2 p-3">
-                        <p
-                          className="line-clamp-2 text-xs font-semibold leading-snug text-zinc-900 dark:text-zinc-50"
-                          title={label}
-                        >
-                          {label}
-                        </p>
-                        <Link
-                          href={`/dashboard/folder/${row.folderId}`}
-                          className="group/link inline-flex max-w-full items-center gap-1 text-[11px] font-semibold text-brand-ink transition hover:text-brand dark:text-brand-on-dark dark:hover:text-brand"
-                        >
-                          <FolderOpen className="h-3 w-3 shrink-0 opacity-80 group-hover/link:opacity-100" aria-hidden />
-                          <span className="min-w-0 truncate">{galleryTitle}</span>
-                        </Link>
-                        <div className="flex items-start gap-1.5 rounded-lg border border-brand/10 bg-brand-soft/45 px-2 py-1.5 dark:border-brand/20 dark:bg-brand/10">
-                          <Clock className="mt-px h-3 w-3 shrink-0 text-brand/55 dark:text-brand-on-dark/70" aria-hidden />
-                          <div className="min-w-0 text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-400">
-                            {deadlineLabel ? (
-                              <>
-                                <span className="font-medium text-zinc-800 dark:text-zinc-200">Restore by </span>
-                                <span className="tabular-nums text-zinc-900 dark:text-zinc-100">{deadlineLabel}</span>
-                              </>
-                            ) : (
-                              "Restore deadline not provided."
-                            )}
-                            {expired ? (
-                              <span className="mt-0.5 block text-[10px] text-amber-700 dark:text-amber-300/95">
-                                This file can no longer be restored.
-                              </span>
-                            ) : null}
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          disabled={expired || busy || purging}
-                          onClick={() => void onRestoreMedia(row)}
-                          className={cn(
-                            "mt-auto flex min-h-9 w-full items-center justify-center gap-1.5 rounded-lg text-xs font-semibold transition",
-                            expired || busy || purging
-                              ? "cursor-not-allowed bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-600"
-                              : "bg-brand text-white shadow-sm shadow-brand/25 hover:bg-brand-hover",
-                          )}
-                        >
-                          {busy ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                          ) : (
-                            <RotateCcw className="h-3.5 w-3.5" aria-hidden />
-                          )}
-                          {busy ? "Restoring…" : "Restore"}
-                        </button>
-                      </div>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-
-            {mediaNextPage !== null && allTrashedMedia.length < data.deletedMediaTotal ? (
-              <div className="mt-4 flex justify-center">
-                <button
-                  type="button"
-                  disabled={mediaLoadingMore || purging}
-                  onClick={() => void loadMoreMedia()}
-                  className={cn(
-                    "inline-flex min-h-9 items-center justify-center gap-2 rounded-full border border-zinc-200 bg-white px-5 text-xs font-semibold text-zinc-800 shadow-sm transition",
-                    "hover:border-brand/35 hover:bg-brand-soft/60 hover:text-brand-ink dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100",
-                    "disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-brand/18 dark:hover:text-brand-on-dark",
-                  )}
-                >
-                  {mediaLoadingMore ? (
-                    "Loading…"
-                  ) : (
-                    <>
-                      <span>Load more</span>
-                      <ChevronDown className="h-4 w-4 opacity-70" aria-hidden />
-                    </>
-                  )}
-                </button>
-              </div>
-            ) : null}
-          </div>
-        </section>
+      {data && hasMediaTrash && mediaNextPage !== null && allTrashedMedia.length < data.deletedMediaTotal ? (
+        <div className="flex justify-center">
+          <button
+            type="button"
+            disabled={mediaLoadingMore || rowBusy}
+            onClick={() => void loadMoreMedia()}
+            className={cn(
+              "inline-flex min-h-8 items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-4 text-xs font-semibold text-zinc-700 shadow-sm transition",
+              "hover:border-brand/30 hover:bg-brand-soft/40 hover:text-brand-ink dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200",
+              "disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-brand/10 dark:hover:text-brand-on-dark",
+            )}
+          >
+            {mediaLoadingMore ? (
+              "Loading…"
+            ) : (
+              <>
+                <span>Load more files</span>
+                <ChevronDown className="h-3.5 w-3.5 opacity-70" aria-hidden />
+              </>
+            )}
+          </button>
+        </div>
       ) : null}
     </div>
   );

@@ -56,3 +56,13 @@ export function isSettingsTabId(value: string | null | undefined): value is Sett
 export function settingsTabMeta(id: SettingsTabId) {
   return SETTINGS_TABS.find((t) => t.id === id)!;
 }
+
+export function settingsTabHref(tab: SettingsTabId): string {
+  return `/dashboard/settings?tab=${tab}`;
+}
+
+export function activeSettingsTabFromSearch(
+  tabParam: string | null | undefined,
+): SettingsTabId {
+  return isSettingsTabId(tabParam) ? tabParam : "profile";
+}

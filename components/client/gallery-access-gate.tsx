@@ -6,13 +6,13 @@ import { useCallback, useState } from "react";
 import { cn } from "@/lib/utils";
 
 type GalleryAccessGateProps = {
-  studioName: string;
+  studioName?: string;
   galleryTitle?: string;
-  onUnlock: (pin: string) => boolean;
+  onUnlock: (pin: string) => boolean | Promise<boolean>;
 };
 
 export function GalleryAccessGate({
-  studioName,
+  studioName = "your photographer",
   galleryTitle,
   onUnlock,
 }: GalleryAccessGateProps) {
@@ -21,7 +21,7 @@ export function GalleryAccessGate({
   const [submitting, setSubmitting] = useState(false);
 
   const submit = useCallback(
-    (value: string) => {
+    async (value: string) => {
       const digits = value.replace(/\D/g, "").slice(0, 4);
       if (digits.length < 4) {
         setError("Enter all 4 digits.");
@@ -29,11 +29,17 @@ export function GalleryAccessGate({
       }
       setSubmitting(true);
       setError(null);
-      const ok = onUnlock(digits);
-      setSubmitting(false);
-      if (!ok) {
-        setError("That code is incorrect. Try again or ask your photographer.");
+      try {
+        const ok = await onUnlock(digits);
+        if (!ok) {
+          setError("That code is incorrect. Try again or ask your photographer.");
+          setPin("");
+        }
+      } catch {
+        setError("Could not verify the code. Check your connection and try again.");
         setPin("");
+      } finally {
+        setSubmitting(false);
       }
     },
     [onUnlock],
@@ -46,14 +52,14 @@ export function GalleryAccessGate({
           <Lock className="h-6 w-6 text-brand dark:text-brand-on-dark" aria-hidden />
         </div>
         <h1 className="mt-4 text-center text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-          Protected gallery
+          Enter gallery code
         </h1>
         <p className="mt-2 text-center text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
           Enter the 4-digit code from{" "}
           <span className="font-medium text-zinc-800 dark:text-zinc-200">
             {studioName || "your photographer"}
           </span>{" "}
-          to continue.
+          to open this gallery.
         </p>
         {galleryTitle ? (
           <p className="mt-1 text-center text-xs text-zinc-500 dark:text-zinc-500">{galleryTitle}</p>
@@ -67,7 +73,7 @@ export function GalleryAccessGate({
             onChange={(value) => {
               setPin(value);
               setError(null);
-              if (value.length === 4) submit(value);
+              if (value.length === 4) void submit(value);
             }}
             className={cn(
               "[&_.ant-input]:!h-9 [&_.ant-input]:!w-8 [&_.ant-input]:!rounded-lg [&_.ant-input]:!text-base [&_.ant-input]:!font-semibold",
@@ -86,10 +92,10 @@ export function GalleryAccessGate({
         <button
           type="button"
           disabled={submitting || pin.length < 4}
-          onClick={() => submit(pin)}
+          onClick={() => void submit(pin)}
           className="mt-6 w-full rounded-xl bg-brand px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {submitting ? "Checking…" : "Continue"}
+          {submitting ? "Checking…" : "Open gallery"}
         </button>
       </div>
     </div>

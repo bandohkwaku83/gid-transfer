@@ -6,18 +6,20 @@
  * Do not conflate with photographer `folder-detail-view` dashboard grids.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import Image from "next/image";
 import {
   CalendarDays,
-  ChevronDown,
   Copy,
   Download,
   Flag,
   Heart,
   Loader2,
   Lock,
-  Send,
+  MessageCircle,
+  MoreVertical,
+  PlayCircle,
   Share2,
   Volume2,
   VolumeX,
@@ -26,21 +28,17 @@ import {
   clientInitials,
   editedCardClass,
   finalDisplaySrc,
+  GalleryViewMoreButton,
   GALLERY_MUSIC_MUTE_PREFIX,
   GRID_LAYOUTS,
   GRID_STORAGE_PREFIX,
   galleryListClass,
-  galleryTileHoverActionsClass,
-  galleryTileHoverIconClass,
   isClientAssetVideo,
   isCollageGridLayout,
   isShareFinalVideo,
   normalizeGalleryImageLayout,
-  SELECTED_STRIP_IMAGE_SIZES,
-  SHARE_GRID_IMAGE_QUALITY,
-  SHARE_LIGHTBOX_IMAGE_QUALITY,
-  SHARE_LIGHTBOX_SIZES,
-  shareGalleryGridSizes,
+  SHARE_GALLERY_INITIAL_VISIBLE,
+  SHARE_GALLERY_LOAD_MORE_COUNT,
   toDemoAssets,
   uploadImageWrapClass,
   uploadItemClass,
@@ -48,20 +46,23 @@ import {
 } from "@/components/client/share-gallery-bits";
 import { useToast } from "@/components/toast-provider";
 import { FormTextArea } from "@/components/ui/form-input";
-import { ClientGalleryPageSkeleton, InlineStatusSkeleton } from "@/components/ui/skeletons";
 import type { DemoAsset, SelectionState } from "@/lib/demo-data";
 import { folderCoverObjectPositionStyle, type ApiFolder } from "@/lib/folders-api";
+import { galleryFontStack, useGalleryGoogleFonts } from "@/lib/gallery-typography";
 import {
+  readAllowDownloadsFromApiBody,
   fetchShareFinalDownloadBlob,
   tryNavigatorShareFinalPhoto,
-  getShareFinalDownloadUrl,
   getShareGallery,
   downloadShareFinalsZip,
   patchShareGalleryFinalComment,
   postShareGalleryFinalFlag,
+  postShareGalleryPhotoComment,
+  postShareGalleryUnlock,
+  submitShareGallerySelectionsToPhotographer,
   type NormalizedShareGallery,
   ShareGalleryError,
-  submitShareGallerySelectionsToPhotographer,
+  isShareGalleryPasswordRequiredError,
   syncShareGallerySelections,
   type PublicGalleryKey,
   type ShareGalleryFinal,
@@ -70,47 +71,92 @@ import {
 import { usePreferInlineFinalSave } from "@/lib/use-prefer-inline-final-save";
 import { useShareSaveHints } from "@/lib/use-share-save-hints";
 import { cn } from "@/lib/utils";
+import { APP_NAME, studioLogoSrc as resolveStudioLogoSrc } from "@/lib/branding";
 import { GalleryAccessGate } from "@/components/client/gallery-access-gate";
+import { ClientPreviewWatermarkOverlay } from "@/components/client/preview-watermark-overlay";
 import { GalleryCoverHero } from "@/components/client/gallery-cover-hero";
 import { MediaLightbox, lightboxMediaClass } from "@/components/ui/media-lightbox";
-import {
-  clearGalleryAccessUnlock,
-  isGalleryAccessUnlocked,
-  markGalleryAccessUnlocked,
-} from "@/lib/gallery-access-client-config";
 import { mergeGalleryAccessSettings } from "@/lib/gallery-access-merge";
+import { GalleryBlogClientSection } from "@/components/gallery-blog/gallery-blog-client-section";
+import {
+  ensureDemoGalleryBlogSeed,
+  listPublishedGalleryBlogPostsForShare,
+  resolveGalleryBlogFolderId,
+} from "@/lib/gallery-blog";
+import {
+  clientGalleryAssetSrc,
+  shouldShowClientPreviewWatermarkOverlay,
+} from "@/lib/preview-watermark-display";
+
+type GalleryPhotoTab = "all" | "selected" | "edited" | "blog";
+
+function VideoTileOverlay() {
+  return (
+    <span className="pointer-events-none absolute inset-0 z-[1] flex items-center justify-center bg-black/10 text-white">
+      <PlayCircle className="h-9 w-9 drop-shadow-md" aria-hidden />
+    </span>
+  );
+}
+
+function tileActionClass(active = false): string {
+  return cn(
+    "inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/45 text-white shadow-sm backdrop-blur-md transition hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80 disabled:cursor-not-allowed disabled:opacity-45",
+    active ? "bg-brand/90 hover:bg-brand" : "bg-black/35 hover:bg-black/60",
+  );
+}
 
 export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey }) {
   const sessionId = publicGallerySessionId(publicKey);
   const { showToast } = useToast();
   const [gallery, setGallery] = useState<NormalizedShareGallery | null>(null);
   const [assets, setAssets] = useState<DemoAsset[]>([]);
-  const [loadState, setLoadState] = useState<"loading" | "error" | "ok">("loading");
+  const [loadState, setLoadState] = useState<"loading" | "locked" | "error" | "ok">("loading");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
+  const [submitSelectionsBusy, setSubmitSelectionsBusy] = useState(false);
   const [lightboxId, setLightboxId] = useState<string | null>(null);
   const [finalLightboxId, setFinalLightboxId] = useState<string | null>(null);
   const [coverLightboxOpen, setCoverLightboxOpen] = useState(false);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [photoTab, setPhotoTab] = useState<"all" | "selected" | "edited">("all");
+  const [photoTab, setPhotoTab] = useState<GalleryPhotoTab>("all");
+  const [publishedBlogCount, setPublishedBlogCount] = useState(0);
   const [zoom, setZoom] = useState(1);
   const [gridLayout, setGridLayout] = useState<GridLayout>("masonry");
+  const [layoutMenuOpen, setLayoutMenuOpen] = useState(false);
+  const layoutMenuRef = useRef<HTMLDivElement>(null);
+  const layoutMenuPanelRef = useRef<HTMLDivElement>(null);
+  const layoutMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const [layoutMenuPosition, setLayoutMenuPosition] = useState<{
+    top: number;
+    right: number;
+  } | null>(null);
+  const [visibleMediaLimit, setVisibleMediaLimit] = useState(SHARE_GALLERY_INITIAL_VISIBLE);
   const [downloadAllFinalsBusy, setDownloadAllFinalsBusy] = useState(false);
   const [finalSaveBusyId, setFinalSaveBusyId] = useState<string | null>(null);
   const [finalFeedback, setFinalFeedback] = useState<{
     finalId: string;
     finalName: string;
     comment: string;
+    savedComment: string;
     flaggedByClient: boolean;
     photographerReply?: string;
+    editing: boolean;
   } | null>(null);
   const [finalFeedbackBusy, setFinalFeedbackBusy] = useState(false);
+  const [photoComment, setPhotoComment] = useState<{
+    photoId: string;
+    photoName: string;
+    comment: string;
+    savedComment: string;
+    photographerReply?: string;
+    readOnly: boolean;
+    editing: boolean;
+  } | null>(null);
+  const [photoCommentBusy, setPhotoCommentBusy] = useState(false);
   const [photoSaveAssist, setPhotoSaveAssist] = useState<{
     objectUrl: string;
     label: string;
     suggestOpenExternally: boolean;
   } | null>(null);
-  const [accessUnlocked, setAccessUnlocked] = useState(false);
 
   const preferInlineFinalSave = usePreferInlineFinalSave();
   const shareHints = useShareSaveHints();
@@ -123,18 +169,65 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [galleryMusicStarted, setGalleryMusicStarted] = useState(false);
   const [galleryMusicMuted, setGalleryMusicMuted] = useState(false);
+  const galleryMusicMutedRef = useRef(galleryMusicMuted);
+  const galleryMusicStartedRef = useRef(galleryMusicStarted);
+  galleryMusicMutedRef.current = galleryMusicMuted;
+  galleryMusicStartedRef.current = galleryMusicStarted;
 
   useEffect(() => {
     initialPhotoTabAppliedRef.current = false;
-    setAccessUnlocked(false);
-    clearGalleryAccessUnlock(sessionId);
+    setVisibleMediaLimit(SHARE_GALLERY_INITIAL_VISIBLE);
   }, [sessionId]);
 
   useEffect(() => {
-    if (loadState === "ok") {
-      setAccessUnlocked(isGalleryAccessUnlocked(sessionId));
+    setVisibleMediaLimit(SHARE_GALLERY_INITIAL_VISIBLE);
+  }, [photoTab]);
+
+  const updateLayoutMenuPosition = useCallback(() => {
+    const button = layoutMenuButtonRef.current;
+    if (!button) {
+      setLayoutMenuPosition(null);
+      return;
     }
-  }, [loadState, sessionId]);
+    const rect = button.getBoundingClientRect();
+    setLayoutMenuPosition({
+      top: rect.bottom + 6,
+      right: Math.max(8, window.innerWidth - rect.right),
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!layoutMenuOpen) {
+      setLayoutMenuPosition(null);
+      return;
+    }
+    updateLayoutMenuPosition();
+    window.addEventListener("resize", updateLayoutMenuPosition);
+    window.addEventListener("scroll", updateLayoutMenuPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateLayoutMenuPosition);
+      window.removeEventListener("scroll", updateLayoutMenuPosition, true);
+    };
+  }, [layoutMenuOpen, updateLayoutMenuPosition]);
+
+  useEffect(() => {
+    if (!layoutMenuOpen) return;
+    function onPointerDown(e: PointerEvent) {
+      const target = e.target as Node;
+      if (layoutMenuRef.current?.contains(target)) return;
+      if (layoutMenuPanelRef.current?.contains(target)) return;
+      setLayoutMenuOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setLayoutMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [layoutMenuOpen]);
 
   useEffect(() => {
     try {
@@ -156,6 +249,21 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
       /* ignore */
     }
   }, [sessionId, gridLayout]);
+
+  useEffect(() => {
+    if (!gallery?.imageLayout) return;
+    try {
+      const key = `${GRID_STORAGE_PREFIX}${sessionId}`;
+      const clientOverride = sessionStorage.getItem(key);
+      if (!clientOverride) {
+        setGridLayout(normalizeGalleryImageLayout(gallery.imageLayout));
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [gallery?.imageLayout, sessionId]);
+
+  useGalleryGoogleFonts(gallery?.titleFont, gallery?.bodyFont);
 
   const galleryMusicUrl = gallery?.backgroundMusicUrl?.trim() ?? "";
   const musicAllowed =
@@ -256,16 +364,24 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
       audio.currentTime = 0;
       setGalleryMusicStarted(false);
     };
-    const stopWhenHidden = () => {
-      if (document.hidden) stopMusic();
+    const handleVisibilityChange = () => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      if (document.hidden) {
+        audio.pause();
+        return;
+      }
+      if (!galleryMusicMutedRef.current && galleryMusicStartedRef.current) {
+        void audio.play().catch(() => {});
+      }
     };
     window.addEventListener("pagehide", stopMusic);
     window.addEventListener("beforeunload", stopMusic);
-    document.addEventListener("visibilitychange", stopWhenHidden);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       window.removeEventListener("pagehide", stopMusic);
       window.removeEventListener("beforeunload", stopMusic);
-      document.removeEventListener("visibilitychange", stopWhenHidden);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (cleanupAudio) {
         cleanupAudio.pause();
         cleanupAudio.currentTime = 0;
@@ -276,23 +392,26 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
   const toggleGalleryMusic = useCallback(() => {
     if (!musicAllowed) return;
     const audio = audioRef.current;
-    const shouldMute = galleryMusicStarted && !galleryMusicMuted;
 
-    try {
-      if (shouldMute) {
-        setGalleryMusicMuted(true);
-        audio?.pause();
-        sessionStorage.setItem(`${GALLERY_MUSIC_MUTE_PREFIX}${sessionId}`, "1");
-        return;
-      }
-
+    if (galleryMusicMuted) {
       setGalleryMusicMuted(false);
-      sessionStorage.removeItem(`${GALLERY_MUSIC_MUTE_PREFIX}${sessionId}`);
-      playGalleryMusic({ ignoreMuted: true, showError: true });
-    } catch {
-      showToast("Could not update gallery music.", "error");
+      try {
+        sessionStorage.removeItem(`${GALLERY_MUSIC_MUTE_PREFIX}${sessionId}`);
+      } catch {
+        /* ignore */
+      }
+      playGalleryMusic({ ignoreMuted: true });
+      return;
     }
-  }, [galleryMusicMuted, galleryMusicStarted, musicAllowed, playGalleryMusic, sessionId, showToast]);
+
+    setGalleryMusicMuted(true);
+    audio?.pause();
+    try {
+      sessionStorage.setItem(`${GALLERY_MUSIC_MUTE_PREFIX}${sessionId}`, "1");
+    } catch {
+      /* ignore */
+    }
+  }, [galleryMusicMuted, musicAllowed, playGalleryMusic, sessionId]);
 
   useEffect(() => {
     if (gallery?.finalDelivery === false && photoTab === "edited") {
@@ -327,6 +446,10 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
       setPhotoTab("selected");
       return;
     }
+    // if (tabParam === "blog" || viewParam === "blog") {
+    //   setPhotoTab("blog");
+    //   return;
+    // }
     if (
       showFinals &&
       (tabParam === "edited" ||
@@ -363,7 +486,7 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
     setGallery(null);
     setAssets([]);
 
-    getShareGallery(publicKey)
+    getShareGallery(publicKey, undefined, { sessionId })
       .then((g) => {
         if (cancelled) return;
         const merged = mergeGalleryAccessSettings(g, sessionId);
@@ -373,6 +496,13 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
       })
       .catch((err) => {
         if (cancelled) return;
+        if (isShareGalleryPasswordRequiredError(err)) {
+          setGallery(null);
+          setAssets([]);
+          setLoadError(null);
+          setLoadState("locked");
+          return;
+        }
         const msg =
           err instanceof ShareGalleryError
             ? err.message
@@ -386,35 +516,82 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
     return () => {
       cancelled = true;
     };
-  }, [publicKey]);
+  }, [publicKey, sessionId]);
+
+  useEffect(() => {
+    if (loadState !== "ok" || !gallery) {
+      setPublishedBlogCount(0);
+      return;
+    }
+    const folderId = resolveGalleryBlogFolderId({
+      folderId: gallery.folderId,
+      publicKey,
+    });
+    if (!folderId) {
+      setPublishedBlogCount(0);
+      return;
+    }
+    ensureDemoGalleryBlogSeed(
+      folderId,
+      assets.slice(0, 6).map((a) => a.id),
+    );
+    setPublishedBlogCount(
+      listPublishedGalleryBlogPostsForShare({ folderId, publicKey }).length,
+    );
+  }, [gallery, loadState, publicKey, assets]);
 
   const editingLocked = useMemo(() => {
     if (!gallery) return true;
     return !gallery.canEditSelections || gallery.selectionLocked;
   }, [gallery]);
 
+  /** When false, hide all client download / save-to-device actions on finals. */
+  const finalsDownloadsAllowed = gallery?.allowDownloads !== false;
+
   const showFinalsTab = gallery ? gallery.finalDelivery !== false : true;
+  // const showBlogTab = publishedBlogCount > 0;
+  const showBlogTab = false;
+  const isPhotoGridTab = photoTab !== "blog";
 
   const selectedCount = assets.filter((a) => a.selection === "SELECTED").length;
   const selectionLimit = gallery?.selectionLimit ?? null;
-  const selectedCountLabel = selectionLimit ? `${selectedCount}/${selectionLimit}` : `${selectedCount}`;
+  const selectionAtLimit =
+    selectionLimit != null && selectedCount >= selectionLimit;
   const editedCount = gallery?.finals.length ?? 0;
   const uploadsCount = gallery?.counts?.uploads ?? assets.length;
 
-  const selectedAssets = useMemo(
-    () => assets.filter((a) => a.selection === "SELECTED"),
-    [assets],
-  );
-
   const visibleAssets = useMemo(() => {
+    if (photoTab === "blog") return [];
     if (photoTab === "selected") return assets.filter((a) => a.selection === "SELECTED");
     if (photoTab === "edited") return [];
     return assets;
   }, [assets, photoTab]);
 
+  const visibleFinals = useMemo(() => gallery?.finals ?? [], [gallery]);
+
+  const displayedFinals = useMemo(
+    () => visibleFinals.slice(0, visibleMediaLimit),
+    [visibleFinals, visibleMediaLimit],
+  );
+
+  const displayedAssets = useMemo(
+    () => visibleAssets.slice(0, visibleMediaLimit),
+    [visibleAssets, visibleMediaLimit],
+  );
+
+  const hasMoreFinals = visibleFinals.length > visibleMediaLimit;
+  const hasMoreAssets = visibleAssets.length > visibleMediaLimit;
+  const remainingFinalsCount = Math.max(0, visibleFinals.length - visibleMediaLimit);
+  const remainingAssetsCount = Math.max(0, visibleAssets.length - visibleMediaLimit);
+
+  const loadMoreGalleryMedia = useCallback(() => {
+    setVisibleMediaLimit((n) => n + SHARE_GALLERY_LOAD_MORE_COUNT);
+  }, []);
+
   const downloadableFinals = useMemo(
-    () => (gallery ? gallery.finals.filter((f) => !f.locked) : []),
-    [gallery],
+    () =>
+      finalsDownloadsAllowed ? visibleFinals.filter((f) => !f.locked) : [],
+    [visibleFinals, finalsDownloadsAllowed],
   );
 
   /** One place for coarse-pointer final Save / Share wording (Share sheet vs in‑app browsers). */
@@ -506,9 +683,55 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
     }
   }, [showToast]);
 
+  const applyDownloadsDisabledFromError = useCallback((body: unknown) => {
+    if (readAllowDownloadsFromApiBody(body) === false) {
+      setGallery((current) => (current ? { ...current, allowDownloads: false } : current));
+    }
+  }, []);
+
+  const handleDownloadFinalDesktop = useCallback(
+    async (f: ShareGalleryFinal) => {
+      if (!finalsDownloadsAllowed || finalSaveBusyId !== null) return;
+      const id = f.id;
+      setFinalSaveBusyId(id);
+      try {
+        const blob = await fetchShareFinalDownloadBlob(publicKey, f);
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = objectUrl;
+        anchor.download = f.name || `final-${f.id}`;
+        anchor.rel = "noopener";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(objectUrl);
+        showToast("Download started.", "success");
+      } catch (e) {
+        if (e instanceof ShareGalleryError) {
+          applyDownloadsDisabledFromError(e.body);
+          showToast(e.message, "error");
+        } else {
+          showToast(
+            e instanceof Error ? e.message : "Could not download this file.",
+            "error",
+          );
+        }
+      } finally {
+        setFinalSaveBusyId((current) => (current === id ? null : current));
+      }
+    },
+    [
+      applyDownloadsDisabledFromError,
+      finalsDownloadsAllowed,
+      finalSaveBusyId,
+      publicKey,
+      showToast,
+    ],
+  );
+
   const handleDeliverFinalPhotoMobile = useCallback(
     async (f: ShareGalleryFinal) => {
-      if (downloadAllFinalsBusy || finalDeliverLock.current) return;
+      if (!finalsDownloadsAllowed || downloadAllFinalsBusy || finalDeliverLock.current) return;
       finalDeliverLock.current = true;
       const id = f.id;
       setFinalSaveBusyId(id);
@@ -526,19 +749,21 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
           suggestOpenExternally: shareHints.inAppSocialWebView,
         });
       } catch (e) {
-        const msg =
-          e instanceof ShareGalleryError
-            ? e.message
-            : e instanceof Error
-              ? e.message
-              : "Could not load this photo.";
-        showToast(msg, "error");
+        if (e instanceof ShareGalleryError) {
+          applyDownloadsDisabledFromError(e.body);
+          showToast(e.message, "error");
+        } else {
+          showToast(
+            e instanceof Error ? e.message : "Could not load this photo.",
+            "error",
+          );
+        }
       } finally {
         finalDeliverLock.current = false;
         setFinalSaveBusyId((cur) => (cur === id ? null : cur));
       }
     },
-    [publicKey, showToast, downloadAllFinalsBusy, shareHints.inAppSocialWebView],
+    [publicKey, showToast, downloadAllFinalsBusy, shareHints.inAppSocialWebView, finalsDownloadsAllowed, applyDownloadsDisabledFromError],
   );
 
   useEffect(() => {
@@ -559,14 +784,35 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
   }, [photoSaveAssist, closePhotoSaveAssist]);
 
   async function refetchGallery() {
-    const g = await getShareGallery(publicKey);
-    setGallery(g);
-    setAssets(toDemoAssets(g.assets));
-    return g;
+    const g = await getShareGallery(publicKey, undefined, { sessionId });
+    const merged = mergeGalleryAccessSettings(g, sessionId);
+    setGallery(merged);
+    setAssets(toDemoAssets(merged.assets));
+    return merged;
   }
 
+  const handleGalleryUnlock = useCallback(
+    async (entered: string): Promise<boolean> => {
+      try {
+        const g = await postShareGalleryUnlock(publicKey, entered);
+        const merged = mergeGalleryAccessSettings(g, sessionId);
+        setGallery(merged);
+        setAssets(toDemoAssets(merged.assets));
+        setLoadState("ok");
+        return true;
+      } catch (e) {
+        if (e instanceof ShareGalleryError && e.status === 401) {
+          return false;
+        }
+        throw e;
+      }
+    },
+    [publicKey, sessionId],
+  );
+
   async function handleDownloadAllFinals() {
-    if (!gallery || downloadableFinals.length === 0 || downloadAllFinalsBusy) return;
+    if (!gallery || !finalsDownloadsAllowed || downloadableFinals.length === 0 || downloadAllFinalsBusy)
+      return;
     setDownloadAllFinalsBusy(true);
     try {
       await downloadShareFinalsZip(
@@ -575,14 +821,15 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
       );
       showToast("Download started.", "success");
     } catch (e) {
-      showToast(
-        e instanceof ShareGalleryError
-          ? e.message
-          : e instanceof Error
-            ? e.message
-            : "Could not download all files.",
-        "error",
-      );
+      if (e instanceof ShareGalleryError) {
+        applyDownloadsDisabledFromError(e.body);
+        showToast(e.message, "error");
+      } else {
+        showToast(
+          e instanceof Error ? e.message : "Could not download all files.",
+          "error",
+        );
+      }
     } finally {
       setDownloadAllFinalsBusy(false);
     }
@@ -591,13 +838,98 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
   function openFinalFeedback(f: ShareGalleryFinal) {
     if (f.locked) return;
     const comment = f.clientComment?.trim() ?? "";
+    const hasExisting = Boolean(f.flaggedByClient) || comment.length > 0;
     setFinalFeedback({
       finalId: f.id,
       finalName: f.name,
       comment,
+      savedComment: comment,
       flaggedByClient: Boolean(f.flaggedByClient),
       photographerReply: f.photographerReply?.trim() || undefined,
+      editing: !hasExisting,
     });
+  }
+
+  function openPhotoComment(asset: Pick<DemoAsset, "id" | "originalName" | "clientComment" | "photographerReply">) {
+    const comment = asset.clientComment?.trim() ?? "";
+    const readOnly = editingLocked;
+    setPhotoComment({
+      photoId: asset.id,
+      photoName: asset.originalName,
+      comment,
+      savedComment: comment,
+      photographerReply: asset.photographerReply?.trim() || undefined,
+      readOnly,
+      editing: !readOnly && comment.length === 0,
+    });
+  }
+
+  function closeFinalFeedbackEdit() {
+    setFinalFeedback((current) => {
+      if (!current) return null;
+      const hadSaved =
+        current.flaggedByClient || current.savedComment.trim().length > 0;
+      if (hadSaved) {
+        return { ...current, editing: false, comment: current.savedComment };
+      }
+      return null;
+    });
+  }
+
+  function closePhotoCommentEdit() {
+    setPhotoComment((current) => {
+      if (!current) return null;
+      if (current.readOnly) return null;
+      if (current.savedComment.trim().length > 0) {
+        return { ...current, editing: false, comment: current.savedComment };
+      }
+      return null;
+    });
+  }
+
+  async function submitPhotoComment() {
+    if (!photoComment || photoCommentBusy || photoComment.readOnly) return;
+    const comment = photoComment.comment.trim();
+    if (!comment) {
+      showToast("Add a note for your photographer before saving.", "error");
+      return;
+    }
+    setPhotoCommentBusy(true);
+    try {
+      await postShareGalleryPhotoComment(publicKey, photoComment.photoId, comment);
+      setAssets((current) =>
+        current.map((a) =>
+          a.id === photoComment.photoId ? { ...a, clientComment: comment } : a,
+        ),
+      );
+      setGallery((current) =>
+        current
+          ? {
+              ...current,
+              assets: current.assets.map((a) =>
+                a.id === photoComment.photoId ? { ...a, clientComment: comment } : a,
+              ),
+            }
+          : current,
+      );
+      showToast("Note saved.", "success");
+      setPhotoComment((current) =>
+        current
+          ? { ...current, savedComment: comment, comment, editing: false }
+          : null,
+      );
+    } catch (e) {
+      showToast(
+        e instanceof ShareGalleryError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Could not save note.",
+        "error",
+      );
+    } finally {
+      setPhotoCommentBusy(false);
+    }
   }
 
   async function submitFinalFeedback() {
@@ -630,7 +962,17 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
         finalFeedback.flaggedByClient ? "Feedback updated." : "Final flagged for review.",
         "success",
       );
-      setFinalFeedback(null);
+      setFinalFeedback((current) =>
+        current
+          ? {
+              ...current,
+              savedComment: comment,
+              comment,
+              flaggedByClient: true,
+              editing: false,
+            }
+          : null,
+      );
     } catch (e) {
       showToast(
         e instanceof ShareGalleryError
@@ -645,8 +987,46 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
     }
   }
 
+  async function handleSubmitSelections() {
+    if (!gallery || editingLocked || submitSelectionsBusy || selectedCount === 0) return;
+    setSubmitSelectionsBusy(true);
+    try {
+      await submitShareGallerySelectionsToPhotographer(publicKey);
+      const g = await refetchGallery();
+      showToast(
+        g.selectionSubmitted
+          ? "Selections updated for your photographer."
+          : "Selections sent to your photographer.",
+        "success",
+      );
+    } catch (e) {
+      showToast(
+        e instanceof ShareGalleryError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Could not submit selections.",
+        "error",
+      );
+    } finally {
+      setSubmitSelectionsBusy(false);
+    }
+  }
+
   async function toggleSelect(id: string) {
     if (editingLocked || syncBusy) return;
+    const asset = assets.find((a) => a.id === id);
+    if (!asset) return;
+    if (asset.selection !== "SELECTED") {
+      const max = gallery?.selectionLimit;
+      if (max != null && selectedCount >= max) {
+        showToast(
+          `You can select up to ${max} photo${max === 1 ? "" : "s"}.`,
+          "error",
+        );
+        return;
+      }
+    }
     const nextAssets: DemoAsset[] = assets.map((a) =>
       a.id === id
         ? {
@@ -673,26 +1053,9 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
     }
   }
 
-  async function submitSelections() {
-    const isUpdate = Boolean(gallery?.selectionSubmitted);
-    setSyncBusy(true);
-    try {
-      await submitShareGallerySelectionsToPhotographer(publicKey);
-      await refetchGallery();
-      setConfirmOpen(false);
-      showToast(
-        isUpdate ? "Updated selection sent to your photographer." : "Selections submitted.",
-        "success",
-      );
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Could not submit.", "error");
-    } finally {
-      setSyncBusy(false);
-    }
-  }
-
   const lbAsset =
     lightboxId ? assets.find((a) => a.id === lightboxId) ?? null : null;
+  const lbAssetHasComment = Boolean(lbAsset?.clientComment?.trim());
   const lbAssetIsVideo = lbAsset ? isClientAssetVideo(lbAsset) : false;
   const lbNavIndex = lbAsset
     ? lightboxNavAssets.findIndex((a) => a.id === lbAsset.id)
@@ -700,10 +1063,10 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
 
   const finalLb =
     gallery && finalLightboxId
-      ? gallery.finals.find((f) => f.id === finalLightboxId) ?? null
+      ? visibleFinals.find((f) => f.id === finalLightboxId) ?? null
       : null;
   const finalLbIndex =
-    finalLb && gallery ? gallery.finals.findIndex((f) => f.id === finalLb.id) : -1;
+    finalLb && gallery ? visibleFinals.findIndex((f) => f.id === finalLb.id) : -1;
 
   useEffect(() => {
     if (photoTab !== "edited") setFinalLightboxId(null);
@@ -713,7 +1076,7 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
     if (
       finalLightboxId &&
       gallery &&
-      !gallery.finals.some((f) => f.id === finalLightboxId)
+      !visibleFinals.some((f) => f.id === finalLightboxId)
     ) {
       setFinalLightboxId(null);
     }
@@ -736,10 +1099,10 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
       if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         if (coverLightboxOpen) return;
 
-        if (finalLightboxId && gallery && gallery.finals.length > 0) {
+        if (finalLightboxId && gallery && visibleFinals.length > 0) {
           if (e.key === "ArrowLeft" && finalLbIndex > 0) {
             e.preventDefault();
-            const prev = gallery.finals[finalLbIndex - 1];
+            const prev = visibleFinals[finalLbIndex - 1];
             if (prev) {
               setFinalLightboxId(prev.id);
               setZoom(1);
@@ -747,10 +1110,10 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
           } else if (
             e.key === "ArrowRight" &&
             finalLbIndex >= 0 &&
-            finalLbIndex < gallery.finals.length - 1
+            finalLbIndex < visibleFinals.length - 1
           ) {
             e.preventDefault();
-            const next = gallery.finals[finalLbIndex + 1];
+            const next = visibleFinals[finalLbIndex + 1];
             if (next) {
               setFinalLightboxId(next.id);
               setZoom(1);
@@ -798,11 +1161,6 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
 
   const displayTitle = gallery?.eventName?.trim() || "Select your favorites";
 
-  const heroBrandLabel = useMemo(() => {
-    const name = gallery?.studio?.companyName?.trim();
-    return name ? name.toUpperCase() : "";
-  }, [gallery?.studio?.companyName]);
-
   const eventDateLabel = useMemo(() => {
     if (!gallery?.eventDate) return null;
     const d = new Date(gallery.eventDate);
@@ -815,40 +1173,27 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
           year: "numeric",
         });
   }, [gallery?.eventDate]);
-  const galleryFrameClass = "mx-auto max-w-[1680px] px-1.5 sm:px-2 lg:px-3";
+  const galleryFrameClass = "mx-auto max-w-[1920px] px-3 sm:px-5";
+  const studioLogoSrc = resolveStudioLogoSrc(gallery?.studio?.logoSrc);
+  const studioDisplayName = gallery?.studio?.companyName?.trim() || APP_NAME;
+  const previewWatermarkEnabled = gallery?.watermarkPreviewEnabled === true;
+  const previewWatermarkLabel = studioDisplayName;
+  const titleFamily = galleryFontStack(gallery?.titleFont, "serif");
+  const bodyFamily = galleryFontStack(gallery?.bodyFont, "sans-serif");
+  const galleryBodyStyle = bodyFamily ? ({ fontFamily: bodyFamily } as const) : undefined;
+  const galleryTitleStyle = titleFamily ? ({ fontFamily: titleFamily } as const) : undefined;
 
   if (loadState === "loading") {
     return (
-      <>
+      <div className="flex min-h-[100dvh] flex-col items-center justify-center bg-zinc-50 dark:bg-zinc-950">
         <span className="sr-only">Loading gallery…</span>
-        <ClientGalleryPageSkeleton />
-      </>
+        <Loader2 className="h-6 w-6 animate-spin text-zinc-400 dark:text-zinc-500" aria-hidden />
+      </div>
     );
   }
 
-  const accessPin = gallery?.shareAccessPin?.replace(/\D/g, "").padStart(4, "0").slice(-4);
-  const needsAccessGate =
-    loadState === "ok" &&
-    gallery != null &&
-    gallery.sharePasswordEnabled === true &&
-    Boolean(accessPin) &&
-    !accessUnlocked;
-
-  if (needsAccessGate && gallery) {
-    const studioLabel =
-      gallery.studio?.companyName?.trim() || gallery.clientName?.trim() || "your photographer";
-    return (
-      <GalleryAccessGate
-        studioName={studioLabel}
-        galleryTitle={gallery.eventName?.trim() || undefined}
-        onUnlock={(entered) => {
-          if (entered !== accessPin) return false;
-          markGalleryAccessUnlocked(sessionId);
-          setAccessUnlocked(true);
-          return true;
-        }}
-      />
-    );
+  if (loadState === "locked") {
+    return <GalleryAccessGate onUnlock={handleGalleryUnlock} />;
   }
 
   if (loadState === "error" || !gallery) {
@@ -862,7 +1207,7 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
           onClick={() => {
             setLoadState("loading");
             setLoadError(null);
-            getShareGallery(publicKey)
+            getShareGallery(publicKey, undefined, { sessionId })
               .then((g) => {
                 const merged = mergeGalleryAccessSettings(g, sessionId);
                 setGallery(merged);
@@ -870,6 +1215,13 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
                 setLoadState("ok");
               })
               .catch((err) => {
+                if (isShareGalleryPasswordRequiredError(err)) {
+                  setGallery(null);
+                  setAssets([]);
+                  setLoadError(null);
+                  setLoadState("locked");
+                  return;
+                }
                 const msg =
                   err instanceof ShareGalleryError
                     ? err.message
@@ -905,6 +1257,7 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
         gallery?.rightsProtection &&
           "select-none [-webkit-touch-callout:none] [user-select:none]",
       )}
+      style={galleryBodyStyle}
     >
       <header className="relative">
         {gallery.coverImageUrl ? (
@@ -914,9 +1267,13 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
             coverColor={gallery.coverColor}
             objectPosition={coverImageObjectPosition}
             displayTitle={displayTitle}
-            heroBrandLabel={heroBrandLabel}
             selectionLocked={gallery.selectionLocked}
             onCoverClick={() => openCoverLb()}
+            studioLogoSrc={studioLogoSrc}
+            titleFont={gallery.titleFont}
+            bodyFont={gallery.bodyFont}
+            coverTextColor={gallery.coverTextColor}
+            coverButtonColor={gallery.coverButtonColor}
           />
         ) : (
           <div className="relative overflow-hidden border-b border-zinc-200/90 bg-gradient-to-br from-indigo-50 via-white to-zinc-50 dark:border-zinc-800 dark:from-zinc-900 dark:via-zinc-950 dark:to-black">
@@ -929,39 +1286,21 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
             <div className={cn(galleryFrameClass, "relative flex flex-col gap-3 pb-2 pt-3 sm:flex-row sm:items-center sm:justify-between sm:pb-2")}>
               <div className="flex items-center gap-3">
                 <Image
-                  src="/images/gido_logo.png"
-                  alt="Gido logo"
+                  src={studioLogoSrc}
+                  alt={`${studioDisplayName} logo`}
                   width={140}
                   height={44}
-                  className="h-8 w-auto object-contain drop-shadow-sm sm:h-9"
+                  className="h-8 w-auto max-w-[140px] object-contain drop-shadow-sm sm:h-9"
                   priority
                 />
               </div>
-              {!editingLocked && photoTab !== "edited" ? (
-                <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:justify-end">
-                  <span className="inline-flex items-center justify-center gap-2 rounded-full border border-white/60 bg-white/70 px-4 py-2 text-xs font-semibold text-zinc-800 shadow-sm backdrop-blur-sm dark:border-zinc-700 dark:bg-zinc-900/70 dark:text-zinc-100">
-                    <Heart className="h-3.5 w-3.5 shrink-0 text-rose-500" aria-hidden />
-                    <span className="tabular-nums">{selectedCountLabel}</span>
-                    <span className="text-zinc-500 dark:text-zinc-400">selected</span>
-                  </span>
-                  <div className="flex items-center gap-2">
-                    {syncBusy ? <InlineStatusSkeleton size={20} /> : null}
-                    <button
-                      type="button"
-                      disabled={selectedCount === 0 || syncBusy}
-                      onClick={() => setConfirmOpen(true)}
-                      className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-brand px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-brand/30 transition hover:bg-brand-hover disabled:opacity-40 sm:w-auto dark:hover:bg-brand-hover"
-                    >
-                      <Send className="h-4 w-4 shrink-0" aria-hidden="true" />
-                      {gallery.selectionSubmitted ? "Submit again" : "Submit Selection"}
-                    </button>
-                  </div>
-                </div>
-              ) : null}
             </div>
 
             <div className={cn(galleryFrameClass, "relative pb-2")}>
-              <h1 className="text-balance text-2xl font-bold leading-tight tracking-tight text-zinc-900 sm:text-3xl dark:text-white">
+              <h1
+                className="text-balance text-2xl font-bold leading-tight tracking-tight text-zinc-900 sm:text-3xl dark:text-white"
+                style={galleryTitleStyle}
+              >
                 {displayTitle}
               </h1>
               <p className="mt-1.5 max-w-2xl text-xs leading-snug text-zinc-600 sm:text-sm dark:text-zinc-400">
@@ -1012,6 +1351,34 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
                     Selections are temporarily locked by your photographer.
                   </p>
                 ) : null}
+                {selectionLimit != null && !editingLocked ? (
+                  <p className="mt-2 rounded-lg border border-zinc-200/90 bg-zinc-50 px-2.5 py-1.5 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900/60 dark:text-zinc-200">
+                    Select up to{" "}
+                    <span className="font-semibold tabular-nums">{selectionLimit}</span>{" "}
+                    photo{selectionLimit === 1 ? "" : "s"}.
+                    {selectionAtLimit ? " You've reached the limit." : null}
+                  </p>
+                ) : null}
+                {!editingLocked && selectedCount > 0 ? (
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={submitSelectionsBusy || syncBusy}
+                      onClick={() => void handleSubmitSelections()}
+                      className="inline-flex items-center gap-1.5 rounded-full bg-brand px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50 sm:text-sm"
+                    >
+                      {submitSelectionsBusy ? (
+                        <Loader2 className="size-3.5 shrink-0 animate-spin" aria-hidden />
+                      ) : null}
+                      {gallery.selectionSubmitted ? "Update selections" : "Submit selections"}
+                    </button>
+                    {gallery.selectionSubmitted ? (
+                      <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                        Your photographer has been notified.
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>
@@ -1019,11 +1386,15 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
 
         <div
           id="client-gallery-body"
-          className="scroll-mt-4 border-b border-zinc-200 bg-white/95 backdrop-blur-md dark:border-zinc-800 dark:bg-zinc-950/95"
+          className="relative z-40 scroll-mt-4 overflow-visible border-b border-zinc-200 bg-white/95 backdrop-blur-md dark:border-zinc-800 dark:bg-zinc-950/95"
         >
-          <div className={cn(galleryFrameClass, "py-4")}>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="-mx-1 flex min-w-0 gap-2 overflow-x-auto pb-1 [scrollbar-width:thin] sm:mx-0 sm:flex-1 sm:pb-0">
+          <div className="mx-auto max-w-[1920px] overflow-visible px-3 py-3 sm:px-5">
+            <div className="flex items-center gap-1.5 overflow-visible rounded-2xl border border-zinc-200/80 bg-white p-1.5 shadow-sm shadow-zinc-900/[0.03] dark:border-zinc-800 dark:bg-zinc-950 sm:gap-2 sm:p-2">
+              <div
+                role="tablist"
+                aria-label="Gallery sections"
+                className="flex min-w-0 flex-1 gap-0.5 rounded-xl bg-zinc-100/80 p-0.5 dark:bg-zinc-900 sm:gap-1 sm:p-1"
+              >
                 {(
                   [
                     ["all", "Originals"],
@@ -1035,27 +1406,31 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
                     key === "all"
                       ? uploadsCount
                       : key === "selected"
-                        ? selectedCountLabel
+                        ? selectedCount
                         : editedCount;
                   const active = photoTab === key;
                   return (
                     <button
                       key={key}
                       type="button"
+                      role="tab"
+                      aria-selected={active}
                       onClick={() => setPhotoTab(key)}
-                      className={`inline-flex min-h-[44px] shrink-0 snap-start items-center gap-2 rounded-full border px-4 py-2.5 text-sm font-semibold transition ${
+                      className={cn(
+                        "inline-flex min-h-[36px] min-w-0 flex-1 items-center justify-center gap-1 rounded-lg px-1.5 py-1.5 text-[11px] font-medium transition sm:min-h-[38px] sm:flex-none sm:gap-1.5 sm:px-3.5 sm:text-sm",
                         active
-                          ? "border-brand/40 bg-brand-soft text-brand shadow-sm dark:border-brand/50 dark:bg-brand/20 dark:text-brand-on-dark"
-                          : "border-transparent bg-zinc-100/90 text-zinc-600 hover:bg-zinc-200/90 hover:text-zinc-900 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                      }`}
+                          ? "bg-white text-zinc-950 shadow-sm ring-1 ring-zinc-200/80 dark:bg-zinc-800 dark:text-white dark:ring-zinc-700"
+                          : "text-zinc-600 hover:bg-white/70 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800/70 dark:hover:text-white",
+                      )}
                     >
-                      <span>{label}</span>
+                      <span className="truncate">{label}</span>
                       <span
-                        className={`rounded-md px-2 py-0.5 text-xs font-bold tabular-nums ${
+                        className={cn(
+                          "shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums sm:px-2 sm:py-0.5 sm:text-[11px]",
                           active
-                            ? "bg-white/90 text-brand dark:bg-zinc-950/50 dark:text-brand-on-dark"
-                            : "bg-white/60 text-zinc-500 dark:bg-zinc-950/40 dark:text-zinc-500"
-                        }`}
+                            ? "bg-zinc-950 text-white dark:bg-white dark:text-zinc-950"
+                            : "bg-white text-zinc-500 dark:bg-zinc-950 dark:text-zinc-400",
+                        )}
                       >
                         {count}
                       </span>
@@ -1063,173 +1438,92 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
                   );
                 })}
               </div>
-              <div
-                className="-mx-1 flex max-w-[100vw] shrink-0 gap-1 overflow-x-auto pb-1 pl-1 [scrollbar-width:thin] sm:mx-0 sm:justify-end sm:pb-0 sm:pl-0"
-                role="toolbar"
-                aria-label="Gallery grid layout"
-              >
-                <div className="flex min-w-0 gap-0.5 rounded-2xl border border-zinc-200/90 bg-zinc-50/90 p-1 dark:border-zinc-800 dark:bg-zinc-900/60">
-                  {GRID_LAYOUTS.map(({ id, shortLabel, icon: Icon }) => {
-                    const active = gridLayout === id;
-                    return (
-                      <button
-                        key={id}
-                        type="button"
-                        onClick={() => setGridLayout(id)}
-                        title={GRID_LAYOUTS.find((g) => g.id === id)?.description}
-                        aria-pressed={active}
-                        className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-2 text-xs font-semibold transition sm:min-h-0 sm:px-3 ${
-                          active
-                            ? "bg-white text-brand shadow-sm ring-1 ring-zinc-200 dark:bg-zinc-800 dark:text-brand-on-dark dark:ring-zinc-700"
-                            : "text-zinc-600 hover:bg-white/80 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                        }`}
-                      >
-                        <Icon className="h-4 w-4 shrink-0 opacity-90" aria-hidden="true" />
-                        <span className="hidden sm:inline">{shortLabel}</span>
-                      </button>
-                    );
-                  })}
+
+              {isPhotoGridTab ? (
+                <div ref={layoutMenuRef} className="relative z-50 shrink-0">
+                  <button
+                    ref={layoutMenuButtonRef}
+                    type="button"
+                    onClick={() => setLayoutMenuOpen((open) => !open)}
+                    aria-expanded={layoutMenuOpen}
+                    aria-haspopup="menu"
+                    aria-label="Change gallery layout"
+                    className={cn(
+                      "inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-200/80 bg-zinc-100/80 text-zinc-700 transition hover:bg-white hover:text-zinc-950 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-white sm:h-[38px] sm:w-[38px] sm:rounded-xl",
+                      layoutMenuOpen &&
+                        "bg-white text-zinc-950 ring-1 ring-zinc-200/80 dark:bg-zinc-800 dark:text-white dark:ring-zinc-700",
+                    )}
+                  >
+                    <MoreVertical className="h-4 w-4 sm:h-5 sm:w-5" aria-hidden />
+                  </button>
+                  {layoutMenuOpen && layoutMenuPosition && typeof document !== "undefined"
+                    ? createPortal(
+                        <div
+                          ref={layoutMenuPanelRef}
+                          role="menu"
+                          aria-label="Gallery layout options"
+                          style={{
+                            position: "fixed",
+                            top: layoutMenuPosition.top,
+                            right: layoutMenuPosition.right,
+                          }}
+                          className="z-[200] min-w-[12.5rem] overflow-hidden rounded-xl border border-zinc-200/90 bg-white py-1 shadow-lg shadow-zinc-900/10 dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-black/40"
+                        >
+                          {GRID_LAYOUTS.map(({ id, label, shortLabel, icon: Icon }) => {
+                            const active = gridLayout === id;
+                            return (
+                              <button
+                                key={id}
+                                type="button"
+                                role="menuitemradio"
+                                aria-checked={active}
+                                onClick={() => {
+                                  setGridLayout(id);
+                                  setLayoutMenuOpen(false);
+                                }}
+                                className={cn(
+                                  "flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-sm transition",
+                                  active
+                                    ? "bg-brand/10 text-brand dark:bg-brand/20 dark:text-brand-100"
+                                    : "text-zinc-700 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800",
+                                )}
+                              >
+                                <Icon className="h-4 w-4 shrink-0 opacity-80" aria-hidden />
+                                <span className="min-w-0 flex-1">
+                                  <span className="block font-medium leading-tight">{shortLabel}</span>
+                                  <span className="mt-0.5 block text-[11px] font-normal text-zinc-500 dark:text-zinc-400">
+                                    {label}
+                                  </span>
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>,
+                        document.body,
+                      )
+                    : null}
                 </div>
-              </div>
+              ) : null}
             </div>
           </div>
         </div>
       </header>
 
-      {photoTab === "all" && selectedAssets.length > 0 ? (
-        <div className="border-b border-zinc-200 bg-white/90 dark:border-zinc-800 dark:bg-zinc-950/80">
-          <div className={cn(galleryFrameClass, "py-4")}>
-            <div className="flex flex-col gap-4 rounded-3xl border border-zinc-200 bg-zinc-50/80 p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900/50 lg:flex-row lg:items-center">
-              <div className="flex min-w-0 items-center gap-3 lg:w-56">
-                <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white text-rose-500 shadow-sm ring-1 ring-zinc-200 dark:bg-zinc-950 dark:ring-zinc-800">
-                  <Heart className="h-4 w-4 fill-current" aria-hidden />
-                </span>
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-                    Selected media
-                  </p>
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                    {selectedCountLabel} selected
-                  </p>
-                </div>
-              </div>
-              <ul
-                className="-mx-1 flex min-w-0 flex-1 gap-2 overflow-x-auto px-1 pb-1 [scrollbar-width:thin]"
-                aria-label="Selected photos"
-              >
-                {selectedAssets.map((a) => {
-                  const isVideo = isClientAssetVideo(a);
-                  const mediaSrc = (a.previewUrl ?? a.thumbUrl).trim();
-                  return (
-                    <li
-                      key={a.id}
-                      className="group relative h-20 w-20 shrink-0 overflow-hidden rounded-2xl border border-white bg-white shadow-sm ring-2 ring-brand/45 dark:border-zinc-900 dark:bg-zinc-950 dark:ring-brand/40 sm:h-24 sm:w-24"
-                    >
-                      <button
-                        type="button"
-                        className="relative block h-full w-full"
-                        onClick={() => openLb(a.id)}
-                      >
-                        {isVideo ? (
-                          <video
-                            src={mediaSrc}
-                            muted
-                            playsInline
-                            preload="metadata"
-                            aria-label={a.originalName}
-                            className="absolute inset-0 h-full w-full bg-black object-cover transition group-hover:scale-[1.03] group-hover:brightness-95"
-                          />
-                        ) : (
-                          <Image
-                            src={a.thumbUrl}
-                            alt=""
-                            fill
-                            sizes={SELECTED_STRIP_IMAGE_SIZES}
-                            quality={SHARE_GRID_IMAGE_QUALITY}
-                            className="object-cover transition group-hover:scale-[1.03] group-hover:brightness-95"
-                          />
-                        )}
-                        {isVideo ? (
-                          <span className="pointer-events-none absolute left-1.5 top-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-white">
-                            Video
-                          </span>
-                        ) : null}
-                        <span className="sr-only">Open {a.originalName}</span>
-                      </button>
-                      {!editingLocked ? (
-                        <button
-                          type="button"
-                          disabled={syncBusy}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void toggleSelect(a.id);
-                          }}
-                          className="absolute right-1.5 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/65 text-white shadow backdrop-blur-sm transition hover:bg-black/80 disabled:opacity-40"
-                          aria-label={`Remove ${a.originalName} from selection`}
-                        >
-                          <span className="text-xs font-bold leading-none">×</span>
-                        </button>
-                      ) : null}
-                    </li>
-                  );
-                })}
-              </ul>
-              <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center lg:justify-end">
-                <button
-                  type="button"
-                  onClick={() => setPhotoTab("selected")}
-                  className="inline-flex items-center justify-center rounded-full border border-zinc-200 bg-white px-4 py-2.5 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-900"
-                >
-                  Review
-                </button>
-                <button
-                  type="button"
-                  disabled={syncBusy || editingLocked}
-                  onClick={() => setConfirmOpen(true)}
-                  className="inline-flex items-center justify-center gap-2 rounded-full bg-brand px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-brand/25 transition hover:bg-brand-hover disabled:opacity-40 dark:hover:bg-brand-hover"
-                >
-                  <Send className="h-4 w-4 shrink-0" aria-hidden="true" />
-                  {gallery.selectionSubmitted ? "Submit again" : "Submit Selection"}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {gallery.selectionSubmitted && !editingLocked && photoTab !== "edited" ? (
-        <div className="mx-auto max-w-3xl px-4 py-3">
-          <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-100">
-            You&apos;ve already submitted your favorites. You can still change your picks anytime
-            — tap photos to add or remove selections, then submit again to update your photographer.
-          </p>
-        </div>
-      ) : null}
-
-      <main className={cn(galleryFrameClass, "py-8 pb-12")}>
-        {gallery.coverImageUrl && !editingLocked && photoTab !== "edited" && !(photoTab === "all" && selectedAssets.length > 0) ? (
-          <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
-            <span className="inline-flex items-center justify-center gap-2 rounded-full border border-zinc-200 bg-white px-4 py-2 text-xs font-semibold text-zinc-800 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100">
-              <Heart className="h-3.5 w-3.5 shrink-0 text-rose-500" aria-hidden />
-              <span className="tabular-nums">{selectedCountLabel}</span>
-              <span className="text-zinc-500 dark:text-zinc-400">selected</span>
-            </span>
-            <div className="flex items-center gap-2 sm:justify-end">
-              {syncBusy ? <InlineStatusSkeleton size={20} /> : null}
-              <button
-                type="button"
-                disabled={selectedCount === 0 || syncBusy}
-                onClick={() => setConfirmOpen(true)}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-full bg-brand px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-brand/30 transition hover:bg-brand-hover disabled:opacity-40 sm:w-auto dark:hover:bg-brand-hover"
-              >
-                <Send className="h-4 w-4 shrink-0" aria-hidden="true" />
-                {gallery.selectionSubmitted ? "Submit again" : "Submit Selection"}
-              </button>
-            </div>
-          </div>
-        ) : null}
-        {photoTab === "edited" ? (
-          gallery.finals.length === 0 ? (
+      <main className="mx-auto max-w-[1920px] bg-white px-4 py-8 pb-12 sm:px-5 dark:bg-zinc-950">
+        {photoTab === "blog" && gallery ? (
+          <GalleryBlogClientSection
+            folderId={gallery.folderId}
+            publicKey={publicKey}
+            assets={assets.map((a) => ({
+              id: a.id,
+              thumbUrl: a.thumbUrl,
+              previewUrl: a.previewUrl,
+              originalName: a.originalName,
+            }))}
+            onViewGallery={() => setPhotoTab("all")}
+          />
+        ) : photoTab === "edited" ? (
+          visibleFinals.length === 0 ? (
             <p className="text-center text-sm text-zinc-500 dark:text-zinc-400">
               Edited media will appear here when your photographer delivers them.
             </p>
@@ -1279,7 +1573,7 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
                 </div>
               ) : null}
               <ul className={galleryListClass(gridLayout)}>
-              {gallery.finals.map((f, index) => {
+              {displayedFinals.map((f, index) => {
                 const locked = Boolean(f.locked);
                 const imgSrc = finalDisplaySrc(f, publicKey);
                 const showUnlockedVideo = !locked && isShareFinalVideo(f);
@@ -1330,16 +1624,15 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
                             }}
                           />
                         ) : (
-                          <Image
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
                             src={imgSrc}
                             alt={f.name}
-                            fill
-                            sizes={shareGalleryGridSizes(gridLayout, index)}
-                            quality={SHARE_GRID_IMAGE_QUALITY}
-                            priority={index < 10}
+                            loading={index < 10 ? "eager" : "lazy"}
+                            decoding="async"
                             draggable={!locked}
                             className={cn(
-                              "cursor-zoom-in object-cover",
+                              "absolute inset-0 h-full w-full cursor-zoom-in object-cover",
                               locked && "select-none",
                             )}
                             onContextMenu={(e) => {
@@ -1347,6 +1640,7 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
                             }}
                           />
                         )}
+                        {showUnlockedVideo ? <VideoTileOverlay /> : null}
                       </button>
                       {locked ? (
                         <div
@@ -1354,66 +1648,76 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
                           aria-hidden
                         />
                       ) : null}
-                      <div className={galleryTileHoverActionsClass}>
+                      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-end bg-gradient-to-t from-black/55 via-black/20 to-transparent p-2 opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
+                        <div className="pointer-events-auto flex items-center gap-1.5">
                         {locked ? (
                           <span
-                            className={cn(galleryTileHoverIconClass, "pointer-events-none")}
-                            aria-hidden
+                            className={tileActionClass()}
+                            title="Locked"
                           >
-                            <Lock className="h-4 w-4 stroke-[1.5]" />
+                            <Lock className="h-4 w-4" aria-hidden />
                           </span>
                         ) : (
                           <>
-                            {preferInlineFinalSave ? (
-                              <button
-                                type="button"
-                                title={touchMobileFinalSaveUx?.saveButtonTitle}
-                                aria-label={
-                                  touchMobileFinalSaveUx?.saveButtonTitle ??
-                                  "Save or share photo to your device"
-                                }
-                                disabled={finalSaveBusyId !== null}
-                                aria-busy={finalSaveBusyId === f.id}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  void handleDeliverFinalPhotoMobile(f);
-                                }}
-                                className={galleryTileHoverIconClass}
-                              >
-                                {finalSaveBusyId === f.id ? (
-                                  <Loader2 className="h-4 w-4 animate-spin stroke-[1.5]" aria-hidden />
-                                ) : (
-                                  <Download className="h-4 w-4 stroke-[1.5]" aria-hidden />
-                                )}
-                              </button>
-                            ) : (
-                              <a
-                                href={getShareFinalDownloadUrl(publicKey, f.id)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                className={galleryTileHoverIconClass}
-                                aria-label={`Download ${f.name}`}
-                              >
-                                <Download className="h-4 w-4 stroke-[1.5]" aria-hidden />
-                              </a>
-                            )}
+                            {finalsDownloadsAllowed ? (
+                              preferInlineFinalSave ? (
+                                <button
+                                  type="button"
+                                  title={touchMobileFinalSaveUx?.saveButtonTitle}
+                                  aria-label={
+                                    touchMobileFinalSaveUx?.saveButtonTitle ??
+                                    "Save or share photo to your device"
+                                  }
+                                  disabled={finalSaveBusyId !== null}
+                                  aria-busy={finalSaveBusyId === f.id}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void handleDeliverFinalPhotoMobile(f);
+                                  }}
+                                  className={tileActionClass()}
+                                >
+                                  {finalSaveBusyId === f.id ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                                  ) : (
+                                    <Download className="h-4 w-4" aria-hidden />
+                                  )}
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={finalSaveBusyId !== null}
+                                  aria-busy={finalSaveBusyId === f.id}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void handleDownloadFinalDesktop(f);
+                                  }}
+                                  className={tileActionClass()}
+                                  aria-label={`Download ${f.name}`}
+                                >
+                                  {finalSaveBusyId === f.id ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                                  ) : (
+                                    <Download className="h-4 w-4" aria-hidden />
+                                  )}
+                                </button>
+                              )
+                            ) : null}
                             <button
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 openFinalFeedback(f);
                               }}
-                              className={galleryTileHoverIconClass}
+                              className={tileActionClass()}
                               aria-label={
                                 f.flaggedByClient
-                                  ? `Update feedback for ${f.name}`
+                                  ? `View feedback for ${f.name}`
                                   : `Flag ${f.name} for review`
                               }
                             >
                               <Flag
                                 className={cn(
-                                  "h-4 w-4 stroke-[1.5]",
+                                  "h-4 w-4",
                                   f.flaggedByClient && "fill-white",
                                 )}
                                 aria-hidden
@@ -1421,12 +1725,19 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
                             </button>
                           </>
                         )}
+                        </div>
                       </div>
                     </div>
                   </li>
                 );
               })}
             </ul>
+              {hasMoreFinals ? (
+                <GalleryViewMoreButton
+                  onClick={loadMoreGalleryMedia}
+                  remainingCount={remainingFinalsCount}
+                />
+              ) : null}
             </>
           )
         ) : visibleAssets.length === 0 ? (
@@ -1436,11 +1747,19 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
               : "No media in this gallery yet."}
           </p>
         ) : (
+          <>
           <ul className={galleryListClass(gridLayout)}>
-            {visibleAssets.map((a, index) => {
+            {displayedAssets.map((a, index) => {
               const isVideo = isClientAssetVideo(a);
-              const mediaSrc = (a.previewUrl ?? a.thumbUrl).trim();
+              const mediaSrc = clientGalleryAssetSrc(a, previewWatermarkEnabled);
+              const showPreviewWatermark = shouldShowClientPreviewWatermarkOverlay(
+                a,
+                previewWatermarkEnabled,
+                isVideo,
+              );
               const isSelected = a.selection === "SELECTED";
+              const assetComment = a.clientComment?.trim() ?? "";
+              const hasAssetComment = assetComment.length > 0;
               return (
                 <li
                   key={a.id}
@@ -1472,7 +1791,7 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
                       ) : isCollageGridLayout(gridLayout) ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img
-                          src={a.thumbUrl}
+                          src={mediaSrc}
                           alt={a.originalName}
                           loading={index < 12 ? "eager" : "lazy"}
                           decoding="async"
@@ -1480,42 +1799,78 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
                           className="block h-auto w-full transition group-hover:brightness-[0.97]"
                         />
                       ) : (
-                        <Image
-                          src={a.thumbUrl}
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={mediaSrc}
                           alt={a.originalName}
-                          fill
-                          sizes={shareGalleryGridSizes(gridLayout, index)}
-                          quality={SHARE_GRID_IMAGE_QUALITY}
-                          priority={index < 10}
-                          className="object-cover transition group-hover:brightness-[0.97]"
+                          loading={index < 10 ? "eager" : "lazy"}
+                          decoding="async"
+                          draggable={!gallery.rightsProtection}
+                          className="absolute inset-0 h-full w-full object-cover transition group-hover:brightness-[0.97]"
                         />
                       )}
-                      {isVideo ? (
-                        <span className="pointer-events-none absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-white">
-                          Video
-                        </span>
-                      ) : null}
+                      {isVideo ? <VideoTileOverlay /> : null}
                     </button>
+                    {showPreviewWatermark ? (
+                      <ClientPreviewWatermarkOverlay text={previewWatermarkLabel} />
+                    ) : null}
 
-                    {photoTab === "all" ? (
-                      <div className={galleryTileHoverActionsClass}>
+                    {!editingLocked ? (
+                      <div
+                        className={cn(
+                          "pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-end bg-gradient-to-t from-black/55 via-black/20 to-transparent p-2 transition group-focus-within:opacity-100 group-hover:opacity-100",
+                          isSelected || hasAssetComment ? "opacity-100" : "opacity-100 sm:opacity-0",
+                        )}
+                      >
+                        <div className="pointer-events-auto flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={syncBusy}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openPhotoComment(a);
+                            }}
+                            className={tileActionClass(hasAssetComment)}
+                            aria-label={
+                              hasAssetComment
+                                ? `View note for ${a.originalName}`
+                                : `Add note for ${a.originalName}`
+                            }
+                            title={hasAssetComment ? "View note" : "Add note"}
+                          >
+                            <MessageCircle
+                              className={cn("h-4 w-4", hasAssetComment && "fill-white")}
+                              aria-hidden="true"
+                            />
+                          </button>
+                          <button
+                            type="button"
+                            disabled={syncBusy}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void toggleSelect(a.id);
+                            }}
+                            className={tileActionClass(isSelected)}
+                            aria-label={isSelected ? "Unselect photo" : "Select photo"}
+                            title={isSelected ? "Unselect" : "Select"}
+                          >
+                            <Heart className="h-4 w-4" aria-hidden="true" />
+                          </button>
+                        </div>
+                      </div>
+                    ) : hasAssetComment ? (
+                      <div className="absolute right-2 top-2 z-10">
                         <button
                           type="button"
-                          disabled={editingLocked || syncBusy}
                           onClick={(e) => {
                             e.stopPropagation();
-                            void toggleSelect(a.id);
+                            openPhotoComment(a);
                           }}
-                          className={galleryTileHoverIconClass}
-                          aria-label={isSelected ? "Remove from favorites" : "Add to favorites"}
+                          className="inline-flex items-center gap-1 rounded-full bg-sky-500/90 px-2 py-1 text-[10px] font-semibold text-white shadow-sm backdrop-blur-sm transition hover:bg-sky-500"
+                          aria-label={`View note for ${a.originalName}`}
                         >
-                          <Heart
-                            className={cn(
-                              "h-4 w-4 stroke-[1.5]",
-                              isSelected && "fill-white",
-                            )}
-                            aria-hidden
-                          />
+                          <MessageCircle className="h-3 w-3 fill-white" aria-hidden />
+                          Note
                         </button>
                       </div>
                     ) : null}
@@ -1524,8 +1879,25 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
               );
             })}
           </ul>
+          {hasMoreAssets ? (
+            <GalleryViewMoreButton
+              onClick={loadMoreGalleryMedia}
+              remainingCount={remainingAssetsCount}
+            />
+          ) : null}
+          </>
         )}
       </main>
+
+      <footer className="border-t border-zinc-200/80 bg-white px-4 py-8 pb-[max(env(safe-area-inset-bottom),2rem)] text-center dark:border-zinc-800 dark:bg-zinc-950 sm:px-5">
+        <Image
+          src="/svgs/color_logo.svg"
+          alt={APP_NAME}
+          width={72}
+          height={78}
+          className="mx-auto h-10 w-auto object-contain opacity-90 sm:h-11"
+        />
+      </footer>
 
       {lightboxId && lbAsset ? (
         <MediaLightbox
@@ -1563,32 +1935,61 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
               <p className="hidden text-xs text-white/60 sm:block">
                 Double-click or scroll to zoom · drag when zoomed
               </p>
-              <button
-                type="button"
-                disabled={editingLocked || syncBusy}
-                onClick={() => void toggleSelect(lbAsset.id)}
-                className={cn(
-                  "inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-sm font-semibold transition",
-                  lbAsset.selection === "SELECTED"
-                    ? "bg-rose-500 text-white shadow-lg shadow-rose-900/30"
-                    : "border border-white/25 bg-white/10 text-white hover:bg-white/15",
-                )}
-              >
-                <Heart
-                  className={cn(
-                    "size-4 stroke-[1.5]",
-                    lbAsset.selection === "SELECTED" && "fill-white",
-                  )}
-                  aria-hidden
-                />
-                {lbAsset.selection === "SELECTED" ? "Selected" : "Select photo"}
-              </button>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                {(lbAssetHasComment || !editingLocked) ? (
+                  <button
+                    type="button"
+                    onClick={() => openPhotoComment(lbAsset)}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-sm font-semibold transition",
+                      lbAssetHasComment
+                        ? "bg-sky-500 text-white shadow-lg shadow-sky-900/30"
+                        : "border border-white/25 bg-white/10 text-white hover:bg-white/15",
+                    )}
+                  >
+                    <MessageCircle
+                      className={cn(
+                        "size-4 stroke-[1.5]",
+                        lbAssetHasComment && "fill-white",
+                      )}
+                      aria-hidden
+                    />
+                    {editingLocked
+                      ? "View note"
+                      : lbAssetHasComment
+                        ? "View note"
+                        : "Add note"}
+                  </button>
+                ) : null}
+                {!editingLocked ? (
+                  <button
+                    type="button"
+                    disabled={syncBusy}
+                    onClick={() => void toggleSelect(lbAsset.id)}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-sm font-semibold transition",
+                      lbAsset.selection === "SELECTED"
+                        ? "bg-rose-500 text-white shadow-lg shadow-rose-900/30"
+                        : "border border-white/25 bg-white/10 text-white hover:bg-white/15",
+                    )}
+                  >
+                    <Heart
+                      className={cn(
+                        "size-4 stroke-[1.5]",
+                        lbAsset.selection === "SELECTED" && "fill-white",
+                      )}
+                      aria-hidden
+                    />
+                    {lbAsset.selection === "SELECTED" ? "Selected" : "Select photo"}
+                  </button>
+                ) : null}
+              </div>
             </div>
           }
         >
           {lbAssetIsVideo ? (
             <video
-              src={lbAsset.previewUrl ?? lbAsset.thumbUrl}
+              src={clientGalleryAssetSrc(lbAsset, previewWatermarkEnabled)}
               controls
               playsInline
               preload="metadata"
@@ -1603,23 +2004,29 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
               }}
             />
           ) : (
-            <Image
-              src={lbAsset.previewUrl ?? lbAsset.thumbUrl}
-              alt={lbAsset.originalName}
-              width={1920}
-              height={1920}
-              sizes={SHARE_LIGHTBOX_SIZES}
-              quality={SHARE_LIGHTBOX_IMAGE_QUALITY}
-              className={cn(
-                lightboxMediaClass,
-                gallery.rightsProtection && "select-none",
-              )}
-              style={{ width: "auto", height: "auto" }}
-              draggable={false}
-              onContextMenu={(e) => {
-                if (gallery.rightsProtection) e.preventDefault();
-              }}
-            />
+            <div className="relative inline-block max-h-full max-w-full">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={clientGalleryAssetSrc(lbAsset, previewWatermarkEnabled)}
+                alt={lbAsset.originalName}
+                className={cn(
+                  lightboxMediaClass,
+                  gallery.rightsProtection && "select-none",
+                )}
+                style={{ width: "auto", height: "auto" }}
+                draggable={false}
+                onContextMenu={(e) => {
+                  if (gallery.rightsProtection) e.preventDefault();
+                }}
+              />
+              {shouldShowClientPreviewWatermarkOverlay(
+                lbAsset,
+                previewWatermarkEnabled,
+                false,
+              ) ? (
+                <ClientPreviewWatermarkOverlay text={previewWatermarkLabel} />
+              ) : null}
+            </div>
           )}
         </MediaLightbox>
       ) : null}
@@ -1635,21 +2042,21 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
             finalLb.locked ? "Preview only until paid" : undefined
           }
           counter={
-            gallery.finals.length > 1
-              ? { current: finalLbIndex + 1, total: gallery.finals.length }
+            visibleFinals.length > 1
+              ? { current: finalLbIndex + 1, total: visibleFinals.length }
               : undefined
           }
           canPrevious={finalLbIndex > 0}
-          canNext={finalLbIndex >= 0 && finalLbIndex < gallery.finals.length - 1}
+          canNext={finalLbIndex >= 0 && finalLbIndex < visibleFinals.length - 1}
           onPrevious={() => {
-            const prev = gallery.finals[finalLbIndex - 1];
+            const prev = visibleFinals[finalLbIndex - 1];
             if (prev) {
               setFinalLightboxId(prev.id);
               setZoom(1);
             }
           }}
           onNext={() => {
-            const next = gallery.finals[finalLbIndex + 1];
+            const next = visibleFinals[finalLbIndex + 1];
             if (next) {
               setFinalLightboxId(next.id);
               setZoom(1);
@@ -1665,35 +2072,65 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
                   <Lock className="size-3.5 shrink-0" aria-hidden />
                   Preview only until paid
                 </span>
-              ) : preferInlineFinalSave ? (
-                <button
-                  type="button"
-                  title={touchMobileFinalSaveUx?.saveButtonTitle}
-                  aria-label={
-                    touchMobileFinalSaveUx?.saveButtonTitle ?? "Save or share photo to your device"
-                  }
-                  disabled={finalSaveBusyId !== null}
-                  aria-busy={finalSaveBusyId === finalLb.id}
-                  onClick={() => void handleDeliverFinalPhotoMobile(finalLb)}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-white px-4 py-2 text-sm font-semibold text-zinc-900 enabled:hover:bg-white/90 disabled:opacity-50"
-                >
-                  {finalSaveBusyId === finalLb.id ? (
-                    <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
-                  ) : (
-                    <Share2 className="size-4 shrink-0" aria-hidden />
-                  )}
-                  Save / Share
-                </button>
               ) : (
-                <a
-                  href={getShareFinalDownloadUrl(publicKey, finalLb.id)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 rounded-full bg-white px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-white/90"
-                >
-                  <Download className="size-4 shrink-0" aria-hidden />
-                  Download
-                </a>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => openFinalFeedback(finalLb)}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-sm font-semibold transition",
+                      finalLb.flaggedByClient
+                        ? "bg-amber-500 text-white hover:bg-amber-400"
+                        : "border border-white/25 bg-white/10 text-white hover:bg-white/15",
+                    )}
+                  >
+                    <Flag
+                      className={cn(
+                        "size-4 shrink-0",
+                        finalLb.flaggedByClient && "fill-white",
+                      )}
+                      aria-hidden
+                    />
+                    {finalLb.flaggedByClient ? "View feedback" : "Flag for review"}
+                  </button>
+                  {finalsDownloadsAllowed ? (
+                    preferInlineFinalSave ? (
+                      <button
+                        type="button"
+                        title={touchMobileFinalSaveUx?.saveButtonTitle}
+                        aria-label={
+                          touchMobileFinalSaveUx?.saveButtonTitle ?? "Save or share photo to your device"
+                        }
+                        disabled={finalSaveBusyId !== null}
+                        aria-busy={finalSaveBusyId === finalLb.id}
+                        onClick={() => void handleDeliverFinalPhotoMobile(finalLb)}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-white px-4 py-2 text-sm font-semibold text-zinc-900 enabled:hover:bg-white/90 disabled:opacity-50"
+                      >
+                        {finalSaveBusyId === finalLb.id ? (
+                          <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
+                        ) : (
+                          <Share2 className="size-4 shrink-0" aria-hidden />
+                        )}
+                        Save / Share
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={finalSaveBusyId !== null}
+                        aria-busy={finalSaveBusyId === finalLb.id}
+                        onClick={() => void handleDownloadFinalDesktop(finalLb)}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-white px-4 py-2 text-sm font-semibold text-zinc-900 enabled:hover:bg-white/90 disabled:opacity-50"
+                      >
+                        {finalSaveBusyId === finalLb.id ? (
+                          <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
+                        ) : (
+                          <Download className="size-4 shrink-0" aria-hidden />
+                        )}
+                        Download
+                      </button>
+                    )
+                  ) : null}
+                </>
               )}
             </div>
           }
@@ -1715,13 +2152,10 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
               }}
             />
           ) : (
-            <Image
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
               src={finalDisplaySrc(finalLb, publicKey)}
               alt={finalLb.name}
-              width={1920}
-              height={1920}
-              sizes={SHARE_LIGHTBOX_SIZES}
-              quality={SHARE_LIGHTBOX_IMAGE_QUALITY}
               className={cn(
                 lightboxMediaClass,
                 gallery.rightsProtection && "select-none",
@@ -1737,8 +2171,144 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
         </MediaLightbox>
       ) : null}
 
+      {photoComment ? (
+        <div className="fixed inset-0 z-[64] flex items-end justify-center p-0 sm:items-center sm:p-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/55"
+            aria-label="Close note"
+            onClick={() => {
+              if (!photoCommentBusy) setPhotoComment(null);
+            }}
+          />
+          <div
+            className="relative z-10 flex max-h-[min(88dvh,640px)] w-full flex-col rounded-t-2xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950 sm:max-w-md sm:rounded-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Photo note: ${photoComment.photoName}`}
+          >
+            <div className="shrink-0 border-b border-zinc-100 px-5 py-4 dark:border-zinc-800">
+              <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">
+                {photoComment.readOnly || !photoComment.editing
+                  ? photoComment.savedComment.trim()
+                    ? "Your note"
+                    : "Photo note"
+                  : photoComment.savedComment.trim()
+                    ? "Edit note"
+                    : "Add a note"}
+              </h2>
+              <p className="mt-1 text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">
+                {photoComment.readOnly || !photoComment.editing
+                  ? photoComment.photoName
+                  : `Leave feedback for your photographer about ${photoComment.photoName}.`}
+              </p>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+              {photoComment.readOnly || !photoComment.editing ? (
+                <div className="space-y-3">
+                  {photoComment.savedComment.trim() ? (
+                    <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 dark:border-zinc-700 dark:bg-zinc-900/50">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                        Your note
+                      </p>
+                      <p className="mt-1.5 text-sm leading-relaxed text-zinc-800 dark:text-zinc-100">
+                        {photoComment.savedComment}
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                      No note on this photo yet.
+                    </p>
+                  )}
+                  {photoComment.photographerReply ? (
+                    <div className="rounded-xl border border-brand/15 bg-brand-soft/60 px-3 py-2.5 dark:border-brand/25 dark:bg-brand/10">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-brand-ink dark:text-brand-on-dark">
+                        Photographer reply
+                      </p>
+                      <p className="mt-1.5 text-sm leading-relaxed text-zinc-800 dark:text-zinc-100">
+                        {photoComment.photographerReply}
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <>
+                  {photoComment.photographerReply ? (
+                    <div className="mb-4 rounded-xl border border-brand/15 bg-brand-soft/60 px-3 py-2.5 dark:border-brand/25 dark:bg-brand/10">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-brand-ink dark:text-brand-on-dark">
+                        Photographer reply
+                      </p>
+                      <p className="mt-1.5 text-sm leading-relaxed text-zinc-800 dark:text-zinc-100">
+                        {photoComment.photographerReply}
+                      </p>
+                    </div>
+                  ) : null}
+                  <FormTextArea
+                    value={photoComment.comment}
+                    onChange={(e) =>
+                      setPhotoComment((current) =>
+                        current ? { ...current, comment: e.target.value } : current,
+                      )
+                    }
+                    rows={4}
+                    placeholder="Example: Please crop tighter on this one."
+                    className="[&_.ant-input]:!resize-none [&_.ant-input]:!rounded-xl"
+                  />
+                </>
+              )}
+            </div>
+            <div className="shrink-0 border-t border-zinc-100 px-5 py-4 dark:border-zinc-800">
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={photoCommentBusy}
+                  onClick={() => {
+                    if (photoComment.editing && !photoComment.readOnly) {
+                      closePhotoCommentEdit();
+                    } else {
+                      setPhotoComment(null);
+                    }
+                  }}
+                  className="rounded-xl border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200"
+                >
+                  {photoComment.editing && !photoComment.readOnly ? "Cancel" : "Close"}
+                </button>
+                {photoComment.readOnly ? null : photoComment.editing ? (
+                  <button
+                    type="button"
+                    disabled={photoCommentBusy || photoComment.comment.trim().length === 0}
+                    onClick={() => void submitPhotoComment()}
+                    className="inline-flex items-center gap-2 rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+                  >
+                    {photoCommentBusy ? (
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                    ) : (
+                      <MessageCircle className="h-4 w-4" aria-hidden />
+                    )}
+                    Save note
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPhotoComment((current) =>
+                        current ? { ...current, editing: true } : current,
+                      )
+                    }
+                    className="inline-flex items-center gap-2 rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white dark:bg-zinc-100 dark:text-zinc-900"
+                  >
+                    <MessageCircle className="h-4 w-4" aria-hidden />
+                    {photoComment.savedComment.trim() ? "Edit note" : "Add note"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {finalFeedback ? (
-        <div className="fixed inset-0 z-[64] flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[64] flex items-end justify-center p-0 sm:items-center sm:p-4">
           <button
             type="button"
             className="absolute inset-0 bg-black/55"
@@ -1748,60 +2318,120 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
             }}
           />
           <div
-            className="relative z-10 w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-5 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+            className="relative z-10 flex max-h-[min(88dvh,640px)] w-full flex-col rounded-t-2xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950 sm:max-w-md sm:rounded-2xl"
             role="dialog"
             aria-modal="true"
             aria-label={`Flag final: ${finalFeedback.finalName}`}
           >
-            <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">
-              {finalFeedback.flaggedByClient ? "Update final feedback" : "Flag this final"}
-            </h2>
-            <p className="mt-1.5 text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">
-              Tell your photographer what should be adjusted for {finalFeedback.finalName}.
-            </p>
-            {finalFeedback.photographerReply ? (
-              <div className="mt-4 rounded-xl border border-brand/15 bg-brand-soft/60 px-3 py-2.5 dark:border-brand/25 dark:bg-brand/10">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-brand-ink dark:text-brand-on-dark">
-                  Photographer reply
-                </p>
-                <p className="mt-1.5 text-sm leading-relaxed text-zinc-800 dark:text-zinc-100">
-                  {finalFeedback.photographerReply}
-                </p>
-              </div>
-            ) : null}
-            <FormTextArea
-              value={finalFeedback.comment}
-              onChange={(e) =>
-                setFinalFeedback((current) =>
-                  current ? { ...current, comment: e.target.value } : current,
-                )
-              }
-              rows={4}
-              placeholder="Example: Skin tone looks too warm. Please re-edit."
-              className="mt-4 [&_.ant-input]:!resize-none [&_.ant-input]:!rounded-xl"
-            />
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                disabled={finalFeedbackBusy}
-                onClick={() => setFinalFeedback(null)}
-                className="rounded-xl border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={finalFeedbackBusy || finalFeedback.comment.trim().length === 0}
-                onClick={() => void submitFinalFeedback()}
-                className="inline-flex items-center gap-2 rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
-              >
-                {finalFeedbackBusy ? (
-                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+            <div className="shrink-0 border-b border-zinc-100 px-5 py-4 dark:border-zinc-800">
+              <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">
+                {!finalFeedback.editing
+                  ? "Feedback"
+                  : finalFeedback.flaggedByClient
+                    ? "Update feedback"
+                    : "Flag this final"}
+              </h2>
+              <p className="mt-1 text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">
+                {!finalFeedback.editing
+                  ? finalFeedback.finalName
+                  : `Tell your photographer what should be adjusted for ${finalFeedback.finalName}.`}
+              </p>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+              {!finalFeedback.editing ? (
+                <div className="space-y-3">
+                  {finalFeedback.savedComment.trim() ? (
+                    <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 dark:border-zinc-700 dark:bg-zinc-900/50">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                        Your feedback
+                      </p>
+                      <p className="mt-1.5 text-sm leading-relaxed text-zinc-800 dark:text-zinc-100">
+                        {finalFeedback.savedComment}
+                      </p>
+                    </div>
+                  ) : null}
+                  {finalFeedback.photographerReply ? (
+                    <div className="rounded-xl border border-brand/15 bg-brand-soft/60 px-3 py-2.5 dark:border-brand/25 dark:bg-brand/10">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-brand-ink dark:text-brand-on-dark">
+                        Photographer reply
+                      </p>
+                      <p className="mt-1.5 text-sm leading-relaxed text-zinc-800 dark:text-zinc-100">
+                        {finalFeedback.photographerReply}
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <>
+                  {finalFeedback.photographerReply ? (
+                    <div className="mb-4 rounded-xl border border-brand/15 bg-brand-soft/60 px-3 py-2.5 dark:border-brand/25 dark:bg-brand/10">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-brand-ink dark:text-brand-on-dark">
+                        Photographer reply
+                      </p>
+                      <p className="mt-1.5 text-sm leading-relaxed text-zinc-800 dark:text-zinc-100">
+                        {finalFeedback.photographerReply}
+                      </p>
+                    </div>
+                  ) : null}
+                  <FormTextArea
+                    value={finalFeedback.comment}
+                    onChange={(e) =>
+                      setFinalFeedback((current) =>
+                        current ? { ...current, comment: e.target.value } : current,
+                      )
+                    }
+                    rows={4}
+                    placeholder="Example: Skin tone looks too warm. Please re-edit."
+                    className="[&_.ant-input]:!resize-none [&_.ant-input]:!rounded-xl"
+                  />
+                </>
+              )}
+            </div>
+            <div className="shrink-0 border-t border-zinc-100 px-5 py-4 dark:border-zinc-800">
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={finalFeedbackBusy}
+                  onClick={() => {
+                    if (finalFeedback.editing) {
+                      closeFinalFeedbackEdit();
+                    } else {
+                      setFinalFeedback(null);
+                    }
+                  }}
+                  className="rounded-xl border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200"
+                >
+                  {finalFeedback.editing ? "Cancel" : "Close"}
+                </button>
+                {finalFeedback.editing ? (
+                  <button
+                    type="button"
+                    disabled={finalFeedbackBusy || finalFeedback.comment.trim().length === 0}
+                    onClick={() => void submitFinalFeedback()}
+                    className="inline-flex items-center gap-2 rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+                  >
+                    {finalFeedbackBusy ? (
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                    ) : (
+                      <Flag className="h-4 w-4" aria-hidden />
+                    )}
+                    {finalFeedback.flaggedByClient ? "Update" : "Flag"}
+                  </button>
                 ) : (
-                  <Flag className="h-4 w-4" aria-hidden />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFinalFeedback((current) =>
+                        current ? { ...current, editing: true } : current,
+                      )
+                    }
+                    className="inline-flex items-center gap-2 rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white dark:bg-zinc-100 dark:text-zinc-900"
+                  >
+                    <Flag className="h-4 w-4" aria-hidden />
+                    Edit feedback
+                  </button>
                 )}
-                {finalFeedback.flaggedByClient ? "Update" : "Flag"}
-              </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1817,13 +2447,10 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
           zoom={zoom}
           onZoomChange={setZoom}
         >
-          <Image
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
             src={gallery.coverImageUrl}
             alt={displayTitle ? `Cover — ${displayTitle}` : "Gallery cover"}
-            width={1920}
-            height={1920}
-            sizes={SHARE_LIGHTBOX_SIZES}
-            quality={SHARE_LIGHTBOX_IMAGE_QUALITY}
             className={cn(
               lightboxMediaClass,
               "object-center",
@@ -1852,73 +2479,25 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
             aria-hidden
             onCanPlay={() => playGalleryMusic()}
           />
-          <div className="fixed bottom-4 right-4 z-[52] sm:bottom-6 sm:right-6">
-            <button
-              type="button"
-              onClick={toggleGalleryMusic}
-              className={cn(
-                "inline-flex h-11 items-center justify-center gap-2 rounded-full border border-zinc-200/90 bg-white/95 text-zinc-900 shadow-lg backdrop-blur-sm transition hover:bg-white dark:border-zinc-600 dark:bg-zinc-900/95 dark:text-zinc-50 dark:hover:bg-zinc-900",
-                galleryMusicStarted && !galleryMusicMuted ? "w-11 px-0" : "px-4",
-              )}
-              aria-label={
-                galleryMusicStarted && !galleryMusicMuted
-                  ? "Mute gallery music"
-                  : "Play gallery music"
-              }
-            >
-              {galleryMusicStarted && !galleryMusicMuted ? (
-                <Volume2 className="h-5 w-5" aria-hidden />
-              ) : (
-                <>
-                  {galleryMusicMuted ? (
-                    <VolumeX className="h-5 w-5" aria-hidden />
-                  ) : (
-                    <Volume2 className="h-5 w-5" aria-hidden />
-                  )}
-                  <span className="text-xs font-semibold">Play music</span>
-                </>
-              )}
-            </button>
-          </div>
-        </>
-      ) : null}
-
-      {confirmOpen ? (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <button
-            type="button"
-            className="absolute inset-0 bg-black/50"
-            aria-label="Close"
-            onClick={() => setConfirmOpen(false)}
-          />
-          <div className="relative z-10 w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
-            <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
-              {gallery.selectionSubmitted ? "Submit updated selection?" : "Submit your selection?"}
-            </h2>
-            <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-300">
-              {gallery.selectionSubmitted
-                ? `You have selected ${selectedCountLabel} image${selectedCount === 1 ? "" : "s"}. This sends your latest picks to your photographer.`
-                : `You selected ${selectedCountLabel} image${selectedCount === 1 ? "" : "s"}. This sends your picks to your photographer.`}
-            </p>
-            <div className="mt-6 flex justify-end gap-2">
+          {galleryMusicStarted || galleryMusicMuted ? (
+            <div className="fixed bottom-4 right-4 z-[52] sm:bottom-6 sm:right-6">
               <button
                 type="button"
-                onClick={() => setConfirmOpen(false)}
-                className="rounded-xl border border-zinc-200 px-4 py-2 text-sm font-medium dark:border-zinc-700"
+                onClick={toggleGalleryMusic}
+                className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-zinc-200/90 bg-white/95 text-zinc-900 shadow-lg backdrop-blur-sm transition hover:bg-white dark:border-zinc-600 dark:bg-zinc-900/95 dark:text-zinc-50 dark:hover:bg-zinc-900"
+                aria-label={
+                  galleryMusicMuted ? "Unmute gallery music" : "Mute gallery music"
+                }
               >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={syncBusy}
-                onClick={() => void submitSelections()}
-                className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white dark:bg-zinc-100 dark:text-black"
-              >
-                Confirm
+                {galleryMusicMuted ? (
+                  <VolumeX className="h-5 w-5" aria-hidden />
+                ) : (
+                  <Volume2 className="h-5 w-5" aria-hidden />
+                )}
               </button>
             </div>
-          </div>
-        </div>
+          ) : null}
+        </>
       ) : null}
 
       {photoSaveAssist ? (
@@ -1977,6 +2556,7 @@ export function ClientGalleryApp({ publicKey }: { publicKey: PublicGalleryKey })
           </div>
         </div>
       ) : null}
+
     </div>
   );
 }

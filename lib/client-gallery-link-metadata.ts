@@ -7,6 +7,7 @@ import {
   type PublicGalleryKey,
   ShareGalleryError,
 } from "@/lib/share-gallery-api";
+import { isLocalDevHostname } from "@/lib/studio-url";
 
 /** Link preview description for shared client galleries (WhatsApp, iMessage, etc.). */
 export const CLIENT_GALLERY_OG_DESCRIPTION = "Photo collection by Gidophotography";
@@ -17,17 +18,6 @@ export function decodeGalleryToken(raw: string): string {
   } catch {
     return raw;
   }
-}
-
-function isLocalHostname(host: string): boolean {
-  const h = host.toLowerCase().split(":")[0] ?? "";
-  return (
-    h === "localhost" ||
-    h.endsWith(".local") ||
-    h.startsWith("127.") ||
-    h.startsWith("192.168.") ||
-    h.startsWith("10.")
-  );
 }
 
 /**
@@ -45,9 +35,12 @@ export async function publicSiteOrigin(): Promise<string> {
     const rawProto = (h.get("x-forwarded-proto") ?? "").split(",")[0]?.trim().toLowerCase() ?? "";
     let proto =
       rawProto ||
-      (isLocalHostname(forwardedHost) ? "http" : "https");
-    // Edge/proxy occasionally forwards `proto=http` to the origin though the public URL is HTTPS.
-    if (proto === "http" && !isLocalHostname(forwardedHost)) {
+      (isLocalDevHostname(forwardedHost) ? "http" : "https");
+    // Local dev (localhost, *.localhost, LAN IPs) always speaks plain HTTP.
+    if (isLocalDevHostname(forwardedHost)) {
+      proto = "http";
+    } else if (proto === "http") {
+      // Edge/proxy occasionally forwards `proto=http` though the public URL is HTTPS.
       proto = "https";
     }
     origin = `${proto}://${forwardedHost}`;

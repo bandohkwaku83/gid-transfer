@@ -5,19 +5,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import { useToast } from "@/components/toast-provider";
 import { BookingCard, BookingDayPill } from "@/components/schedules/booking-card";
+import { BookingCategoryFilter } from "@/components/schedules/booking-category-filter";
 import { BookingsOverviewStrip } from "@/components/schedules/bookings-overview-strip";
+import { BookingInvoiceModal } from "@/components/schedules/booking-invoice-modal";
 import { NewBookingModal, type NewBookingDraft } from "@/components/schedules/new-booking-modal";
 import {
   formatBookedTimeLabel,
   type BookedShoot,
-  type ShootKind,
-  KIND_META,
-  SHOOT_KINDS_ORDER,
   timeSortMinutes,
 } from "@/components/schedules/booking-types";
+import { FALLBACK_SHOOT_TYPES, bookingDotClass } from "@/lib/booking-shoot-types";
 import {
-  apiColorToDotClass,
-  apiShootTypeToKind,
   createBooking,
   deleteBooking,
   formatHmToApi12h,
@@ -25,14 +23,21 @@ import {
   getBookingsMeta,
   getBookingsStats,
   getUpcomingBooking,
-  kindToApiShootType,
   listBookings,
   mapApiBookingToBookedShoot,
   updateBooking,
+  type ApiBooking,
   type BookingShootTypeMeta,
 } from "@/lib/bookings-api";
 import { ApiError } from "@/lib/clients-api";
 import { cn } from "@/lib/utils";
+import {
+  DashboardPageHeader,
+  dashboardPageHeaderChipClassName,
+  dashboardPageHeaderCtaClassName,
+  dashboardPageHeaderDescriptionClassName,
+  dashboardPageHeaderTitleClassName,
+} from "@/components/dashboard/dashboard-page-header";
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 
@@ -96,7 +101,7 @@ function relativeDayLabel(iso: string): string {
 }
 
 function shootDotClass(s: BookedShoot): string {
-  return apiColorToDotClass(s.shootColor) ?? KIND_META[s.kind].dot;
+  return bookingDotClass(s.shootColor);
 }
 
 export function SchedulesClient() {
@@ -108,15 +113,15 @@ export function SchedulesClient() {
   const [viewYear, setViewYear] = useState(today.getFullYear());
   const [viewMonth, setViewMonth] = useState(today.getMonth());
   const [selectedDay, setSelectedDay] = useState<number | null>(today.getDate());
-  const [kindFilter, setKindFilter] = useState<ShootKind | "all">("all");
+  const [categoryFilter, setCategoryFilter] = useState<string | "all">("all");
 
   const [bookings, setBookings] = useState<BookedShoot[]>([]);
   const [bookingsLoading, setBookingsLoading] = useState(true);
   const [bookingModalOpen, setBookingModalOpen] = useState(false);
   const [editingBooking, setEditingBooking] = useState<BookedShoot | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [invoiceBooking, setInvoiceBooking] = useState<BookedShoot | null>(null);
   const [shootTypesMeta, setShootTypesMeta] = useState<BookingShootTypeMeta[]>([]);
-  const [legendMeta, setLegendMeta] = useState<BookingShootTypeMeta[]>([]);
   const [stats, setStats] = useState<{
     thisWeekCount: number;
     thisMonthCount: number;
@@ -124,29 +129,26 @@ export function SchedulesClient() {
   } | null>(null);
   const [nextShoot, setNextShoot] = useState<BookedShoot | null>(null);
 
-  const filterKeys = useMemo((): readonly (ShootKind | "all")[] => {
-    if (shootTypesMeta.length > 0) {
-      const kinds: ShootKind[] = [];
-      for (const t of shootTypesMeta) {
-        const k = apiShootTypeToKind(t.id);
-        if (!kinds.includes(k)) kinds.push(k);
-      }
-      return ["all", ...kinds];
-    }
-    return ["all", ...SHOOT_KINDS_ORDER];
-  }, [shootTypesMeta]);
+  const effectiveShootTypes = useMemo(
+    () => (shootTypesMeta.length > 0 ? shootTypesMeta : FALLBACK_SHOOT_TYPES),
+    [shootTypesMeta],
+  );
+
+  const mapBooking = useCallback(
+    (b: ApiBooking) => mapApiBookingToBookedShoot(b, effectiveShootTypes),
+    [effectiveShootTypes],
+  );
 
   const loadMonth = useCallback(async () => {
     setBookingsLoading(true);
     try {
-      const typeParam =
-        kindFilter === "all" ? "" : kindToApiShootType(kindFilter);
+      const typeParam = categoryFilter === "all" ? "" : categoryFilter;
       const res = await listBookings({
         year: viewYear,
         month: viewMonth + 1,
         type: typeParam,
       });
-      setBookings(res.bookings.map(mapApiBookingToBookedShoot));
+      setBookings(res.bookings.map(mapBooking));
     } catch (e) {
       const msg =
         e instanceof ApiError ? e.message : e instanceof Error ? e.message : "Could not load bookings.";
@@ -155,7 +157,7 @@ export function SchedulesClient() {
     } finally {
       setBookingsLoading(false);
     }
-  }, [viewYear, viewMonth, kindFilter, showToast]);
+  }, [viewYear, viewMonth, categoryFilter, mapBooking, showToast]);
 
   useEffect(() => {
     let cancelled = false;
@@ -164,12 +166,10 @@ export function SchedulesClient() {
         const meta = await getBookingsMeta();
         if (cancelled) return;
         setShootTypesMeta(meta.shootTypes);
-        setLegendMeta(meta.legend.length > 0 ? meta.legend : meta.shootTypes);
       } catch (e) {
         if (!cancelled) {
           showToast(e instanceof Error ? e.message : "Could not load booking types.", "error");
           setShootTypesMeta([]);
-          setLegendMeta([]);
         }
       }
     })();
@@ -190,11 +190,11 @@ export function SchedulesClient() {
   const refreshUpcoming = useCallback(async () => {
     try {
       const b = await getUpcomingBooking();
-      setNextShoot(b ? mapApiBookingToBookedShoot(b) : null);
+      setNextShoot(b ? mapBooking(b) : null);
     } catch {
       setNextShoot(null);
     }
-  }, []);
+  }, [mapBooking]);
 
   useEffect(() => {
     let cancelled = false;
@@ -218,7 +218,7 @@ export function SchedulesClient() {
       try {
         const b = await getBooking(bookingFocusId);
         if (cancelled) return;
-        const shoot = mapApiBookingToBookedShoot(b);
+        const shoot = mapBooking(b);
         const { y, m, d } = parseIso(shoot.date);
         setViewYear(y);
         setViewMonth(m);
@@ -236,7 +236,7 @@ export function SchedulesClient() {
     return () => {
       cancelled = true;
     };
-  }, [bookingFocusId, router, showToast]);
+  }, [bookingFocusId, mapBooking, router, showToast]);
 
   const shoots = useMemo(() => {
     return bookings.filter((b) => {
@@ -319,11 +319,14 @@ export function SchedulesClient() {
       title: draft.title,
       clientId: draft.clientId,
       date: draft.date,
-      shootType: kindToApiShootType(draft.kind),
+      shootType: draft.shootCategory,
       start: formatHmToApi12h(draft.startTime),
       end: draft.endTime ? formatHmToApi12h(draft.endTime) : "",
       location: draft.location?.trim() ?? "",
-      description: draft.description?.trim() ?? "",
+      notes: draft.notes?.trim() ?? "",
+      amountCharged:
+        draft.amountCharged && draft.amountCharged > 0 ? draft.amountCharged : null,
+      currency: draft.currency ?? "GHS",
     };
   }
 
@@ -356,11 +359,22 @@ export function SchedulesClient() {
     setEditingBooking(null);
   }
 
+  function openInvoiceForBooking(shoot: BookedShoot) {
+    setInvoiceBooking(shoot);
+  }
+
+  function closeInvoiceModal() {
+    setInvoiceBooking(null);
+  }
+
   async function handleSaveBooking(draft: NewBookingDraft) {
     const { booking } = await createBooking(bookingPayloadFromDraft(draft));
-    const mapped = mapApiBookingToBookedShoot(booking);
+    const mapped = mapBooking(booking);
     applyBookingToState(mapped, draft.date);
     showToast("Booking saved.", "success");
+    if (mapped.amountCharged && mapped.amountCharged > 0) {
+      setInvoiceBooking(mapped);
+    }
   }
 
   async function handleUpdateBooking(draft: NewBookingDraft) {
@@ -369,7 +383,7 @@ export function SchedulesClient() {
       editingBooking.id,
       bookingPayloadFromDraft(draft),
     );
-    const mapped = mapApiBookingToBookedShoot(booking);
+    const mapped = mapBooking(booking);
     applyBookingToState(mapped, draft.date);
     showToast("Booking updated.", "success");
   }
@@ -409,51 +423,30 @@ export function SchedulesClient() {
     [pendingDeleteId, nextShoot?.id, showToast, loadMonth, refreshStats, refreshUpcoming],
   );
 
-  function filterChipLabel(k: ShootKind | "all"): string {
-    if (k === "all") return "All";
-    if (shootTypesMeta.length > 0) {
-      const hit = shootTypesMeta.find((t) => apiShootTypeToKind(t.id) === k);
-      if (hit) return hit.label;
-    }
-    return KIND_META[k].label;
-  }
-
   return (
     <div className="dashboard-page space-y-6">
-      <section className="relative overflow-hidden rounded-2xl border border-slate-800/50 bg-gradient-to-br from-slate-950 via-indigo-950/85 to-slate-900 shadow-lg shadow-slate-900/20">
-        <div
-          className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-brand/15 blur-3xl"
-          aria-hidden
-        />
-        <div className="relative flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-[1.65rem]">
-              Bookings
-            </h1>
-            <p className="mt-2 max-w-xl text-sm leading-relaxed text-slate-400">
-              Plan shoots, see what&apos;s on the calendar, and keep session details next to each
-              client.
+      <DashboardPageHeader innerClassName="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <h1 className={dashboardPageHeaderTitleClassName()}>Bookings</h1>
+          <p className={dashboardPageHeaderDescriptionClassName()}>
+            Plan shoots, see what&apos;s on the calendar, and keep session details next to each
+            client.
+          </p>
+          {nextShoot ? (
+            <p className={dashboardPageHeaderChipClassName("mt-3 max-w-full flex-wrap")}>
+              <span className="font-semibold">Next up</span>
+              <span className="truncate text-brand-ink/80 dark:text-brand-on-dark/90">
+                {nextShoot.title}, {relativeDayLabel(nextShoot.date)},{" "}
+                {formatBookedTimeLabel(nextShoot.startTime)}
+              </span>
             </p>
-            {nextShoot ? (
-              <p className="mt-3 inline-flex max-w-full flex-wrap items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300">
-                <span className="font-semibold text-white/90">Next up</span>
-                <span className="truncate text-slate-300">
-                  {nextShoot.title}, {relativeDayLabel(nextShoot.date)},{" "}
-                  {formatBookedTimeLabel(nextShoot.startTime)}
-                </span>
-              </p>
-            ) : null}
-          </div>
-          <button
-            type="button"
-            onClick={openCreateBooking}
-            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white shadow-md transition hover:bg-brand-hover"
-          >
-            <Plus className="h-4 w-4" aria-hidden />
-            New booking
-          </button>
+          ) : null}
         </div>
-      </section>
+        <button type="button" onClick={openCreateBooking} className={dashboardPageHeaderCtaClassName()}>
+          <Plus className="h-4 w-4" aria-hidden />
+          New booking
+        </button>
+      </DashboardPageHeader>
 
       <BookingsOverviewStrip
         weekCount={stats?.thisWeekCount ?? null}
@@ -461,28 +454,6 @@ export function SchedulesClient() {
         todayCount={stats?.todayCount ?? 0}
         loading={bookingsLoading && stats == null}
       />
-
-      <div className="flex flex-wrap gap-2">
-        {filterKeys.map((k) => {
-          const active = kindFilter === k;
-          const label = filterChipLabel(k);
-          return (
-            <button
-              key={k}
-              type="button"
-              onClick={() => setKindFilter(k)}
-              className={cn(
-                "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
-                active
-                  ? "border-brand bg-brand/10 text-brand-ink ring-2 ring-brand/25 dark:text-brand-on-dark"
-                  : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800",
-              )}
-            >
-              {label}
-            </button>
-          );
-        })}
-      </div>
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(280px,340px)] 2xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)] 2xl:gap-8">
         <section className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-950 sm:p-6">
@@ -496,30 +467,40 @@ export function SchedulesClient() {
                 </span>
               ) : null}
             </div>
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={goPrev}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-200 text-zinc-600 transition hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                aria-label="Previous month"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={goToday}
-                className="rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-semibold text-zinc-700 transition hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-              >
-                Today
-              </button>
-              <button
-                type="button"
-                onClick={goNext}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-200 text-zinc-600 transition hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                aria-label="Next month"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <BookingCategoryFilter
+                shootTypes={effectiveShootTypes}
+                value={categoryFilter}
+                onChange={setCategoryFilter}
+                disabled={bookingsLoading}
+                showLabel={false}
+                className="w-full sm:w-auto"
+              />
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={goPrev}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-200 text-zinc-600 transition hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  aria-label="Previous month"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={goToday}
+                  className="rounded-lg border border-zinc-200 px-3 py-1.5 text-xs font-semibold text-zinc-700 transition hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                >
+                  Today
+                </button>
+                <button
+                  type="button"
+                  onClick={goNext}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-200 text-zinc-600 transition hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  aria-label="Next month"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              </div>
             </div>
           </div>
 
@@ -602,27 +583,6 @@ export function SchedulesClient() {
               );
             })}
           </div>
-
-          <div className="mt-4 flex flex-wrap gap-4 border-t border-zinc-100 pt-4 dark:border-zinc-800">
-            {legendMeta.length > 0
-              ? legendMeta.map((t) => (
-                  <div key={t.id} className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400">
-                    <span
-                      className={cn(
-                        "h-2 w-2 shrink-0 rounded-full",
-                        apiColorToDotClass(t.color) ?? "bg-zinc-400",
-                      )}
-                    />
-                    {t.label}
-                  </div>
-                ))
-              : SHOOT_KINDS_ORDER.map((k) => (
-                  <div key={k} className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400">
-                    <span className={cn("h-2 w-2 rounded-full", KIND_META[k].dot)} />
-                    {KIND_META[k].label}
-                  </div>
-                ))}
-          </div>
         </section>
 
         <aside className="flex flex-col gap-4">
@@ -680,6 +640,7 @@ export function SchedulesClient() {
                       shoot={s}
                       onEdit={openEditBooking}
                       onDelete={handleDeleteBooking}
+                      onInvoice={openInvoiceForBooking}
                       deleting={pendingDeleteId === s.id}
                     />
                   </li>
@@ -737,6 +698,12 @@ export function SchedulesClient() {
         booking={editingBooking}
         shootTypes={shootTypesMeta}
         onSave={editingBooking ? handleUpdateBooking : handleSaveBooking}
+      />
+
+      <BookingInvoiceModal
+        open={invoiceBooking != null}
+        booking={invoiceBooking}
+        onClose={closeInvoiceModal}
       />
     </div>
   );

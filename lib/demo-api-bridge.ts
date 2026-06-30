@@ -15,10 +15,12 @@ import {
   loadAllProjectsWithTrash,
   loadProjectById,
   loadProjectForClientShare,
+  SEED_PROJECTS,
 } from "@/lib/demo-data";
 import type { ApiFolder, ApiFolderMedia, ApiFolderShare } from "@/lib/folders/types";
 import { normalizeGalleryCoverColor } from "@/lib/gallery-cover-color";
 import { normalizeGalleryCoverFrame } from "@/lib/gallery-cover-frame";
+import { normalizeGalleryImageLayout } from "@/lib/gallery-image-layout";
 
 function normalizeSelectionLimit(raw: number | null | undefined): number | null {
   if (raw == null || raw === 0) return null;
@@ -166,9 +168,13 @@ export function demoProjectToApiFolder(project: DemoProject): ApiFolder {
   const sets = demoSetsToApi(project.id);
   const firstCover = project.assets[0]?.thumbUrl;
   const bg = override?.demoBackgroundMusicUrl;
+  const isSeedProject = SEED_PROJECTS.some((seed) => seed.id === project.id);
+  const shareEnabled = override?.shareEnabled ?? isSeedProject;
   const share: ApiFolderShare = {
     code: project.shareToken,
     slug: project.shareToken,
+    enabled: shareEnabled,
+    sharedAt: override?.shareSharedAt ?? (shareEnabled ? project.updatedAt : null),
     selectionSubmittedAt: project.selectionSubmitted ? project.updatedAt : null,
     selectionLocked: override?.selectionLocked ?? false,
     selectionLimit: normalizeSelectionLimit(override?.selectionLimit),
@@ -189,6 +195,12 @@ export function demoProjectToApiFolder(project: DemoProject): ApiFolder {
     coverFocalY: focalY,
     coverFrame: normalizeGalleryCoverFrame(override?.coverFrame),
     coverColor: normalizeGalleryCoverColor(override?.coverColor),
+    ...(override?.coverFrame || override?.coverColor || isSeedProject
+      ? { coverStyleConfigured: true }
+      : {}),
+    ...(override?.imageLayout
+      ? { imageLayout: normalizeGalleryImageLayout(override.imageLayout) }
+      : {}),
     usingDefaultCover: !firstCover,
     share,
     shareUrl: sitePath,
@@ -203,6 +215,9 @@ export function demoProjectToApiFolder(project: DemoProject): ApiFolder {
     updatedAt: project.updatedAt,
     selectionLocked: override?.selectionLocked ?? false,
     selectionLimit: normalizeSelectionLimit(override?.selectionLimit),
+    ...(override?.watermarkFinalsEnabled !== undefined
+      ? { watermarkFinalsEnabled: override.watermarkFinalsEnabled }
+      : {}),
     backgroundMusicEnabled: Boolean(bg?.trim()),
     backgroundMusicUrl: bg?.trim() || undefined,
   };

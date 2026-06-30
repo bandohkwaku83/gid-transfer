@@ -7,10 +7,12 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-sans);
+  --font-sans: var(--font-questrial), system-ui, sans-serif;
   --font-mono: var(--font-geist-mono);
-  --font-heading: var(--font-sans);
-  --font-display: var(--font-serif);
+  --font-heading: var(--font-display);
+  --font-display: "Recoleta", var(--font-recoleta-fallback), Georgia, "Times New Roman", serif;
+  --font-script: "Photograph Signature", var(--font-script-fallback), cursive;
+  --font-serif: var(--font-display);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -47,14 +49,14 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
-  /* Studio accent — Tailwind indigo-600 family (login, shell, modals, dashboard) */
-  --color-brand: #4f46e5;
-  --color-brand-hover: #4338ca;
-  --color-brand-on-dark: #a5b4fc;
+  /* Studio accent — burgundy (dashboard, login, modals) */
+  --color-brand: #55001f;
+  --color-brand-hover: #440019;
+  --color-brand-on-dark: #e899b0;
   --color-brand-foreground: #ffffff;
-  --color-brand-soft: #eef2ff;
-  --color-brand-ink: #3730a3;
-  --color-brand-muted: #e0e7ff;
+  --color-brand-soft: #f8eef1;
+  --color-brand-ink: #420018;
+  --color-brand-muted: #ecd5dc;
 }
 
 :root {
@@ -138,6 +140,31 @@
     scroll-behavior: smooth;
     scroll-padding-top: 6rem;
   }
+}
+
+/* Licensed brand fonts — drop WOFF2 files into public/fonts/ to activate. */
+@font-face {
+  font-family: "Recoleta";
+  src: url("/fonts/recoleta-regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Recoleta";
+  src: url("/fonts/recoleta-bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Photograph Signature";
+  src: url("/fonts/photograph-signature.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
 }
 
 @keyframes toast-enter {
@@ -308,8 +335,13 @@
 
 @layer utilities {
   .font-display {
-    font-family: var(--font-display, var(--font-sans));
-    font-feature-settings: "ss01" on, "kern" on;
+    font-family: var(--font-display);
+  }
+  .font-heading {
+    font-family: var(--font-display);
+  }
+  .font-script {
+    font-family: var(--font-script);
   }
   .animate-landing-float {
     animation: landing-float 7s ease-in-out infinite;
@@ -432,14 +464,226 @@
   .dashboard-page {
     @apply mx-auto w-full max-w-6xl xl:max-w-7xl 2xl:max-w-[90rem];
   }
+  .dashboard-hero {
+    @apply relative overflow-hidden rounded-3xl bg-[#1a1214] text-white;
+    box-shadow: 0 24px 64px -24px rgba(0, 0, 0, 0.55);
+  }
+  .dashboard-hero-rings {
+    @apply pointer-events-none absolute -right-10 -top-10 h-[17rem] w-[17rem] text-[#d5ae65]/25 sm:-right-6 sm:-top-6 sm:h-[20rem] sm:w-[20rem];
+  }
+  .dashboard-hero-inner {
+    @apply relative z-[1] px-7 py-8 sm:px-10 sm:py-10 lg:px-12 lg:py-11;
+  }
+  .dashboard-hero-date {
+    @apply flex items-center gap-3 text-[10px] font-medium uppercase tracking-[0.2em] text-[#d5ae65]/80;
+  }
+  .dashboard-hero-date-line {
+    @apply h-px w-8 shrink-0 bg-[#d5ae65]/50;
+  }
+  .dashboard-hero-title {
+    @apply mt-5 font-display text-[2.35rem] font-normal leading-[1.05] tracking-tight text-white sm:text-[2.85rem] lg:text-[3.15rem];
+  }
+  .dashboard-hero-name {
+    @apply italic text-[#d5ae65];
+  }
+  .dashboard-hero-tagline {
+    @apply mt-3 max-w-xl text-[13px] leading-relaxed text-white/40 sm:text-sm;
+  }
+  .dashboard-hero-actions {
+    @apply mt-5 flex flex-wrap items-center gap-5;
+  }
+  .dashboard-hero-action {
+    @apply inline-flex items-center gap-1.5 text-[13px] font-medium text-white/35 transition hover:text-white/70;
+  }
+  .dashboard-hero-stats {
+    @apply mt-9 flex flex-wrap rounded-2xl border border-white/[0.06] bg-white/[0.04] sm:mt-10 sm:flex-nowrap;
+  }
+  .dashboard-hero-stats-divider {
+    @apply hidden w-px shrink-0 self-stretch bg-white/[0.08] sm:block;
+  }
+  .dashboard-hero-stats-cell {
+    @apply flex w-1/2 flex-col px-5 py-5 transition hover:bg-white/[0.03] sm:w-auto sm:flex-1 sm:px-6 sm:py-6;
+  }
+  .dashboard-hero-stats-value {
+    @apply font-display text-[2rem] font-normal leading-none tabular-nums text-white sm:text-[2.15rem];
+  }
+  .dashboard-hero-stats-value--loading {
+    @apply inline-block h-8 w-10 animate-pulse rounded bg-white/10;
+  }
+  .dashboard-hero-stats-label {
+    @apply mt-2.5 text-[13px] font-medium text-[#d5ae65]/90;
+  }
+  .dashboard-hero-stats-hint {
+    @apply mt-0.5 text-[11px] text-white/30;
+  }
+  .dashboard-hero-nav {
+    @apply mt-8 flex flex-wrap items-center gap-x-6 gap-y-3 sm:mt-9 sm:gap-x-8;
+  }
+  .dashboard-hero-nav-item {
+    @apply inline-flex items-center gap-2 text-[13px] font-medium text-white/35 transition hover:text-white/55;
+  }
+  .dashboard-hero-nav-item--active {
+    @apply rounded-full border border-[#d5ae65]/35 bg-white/[0.05] px-4 py-2 text-[#d5ae65] hover:text-[#d5ae65];
+  }
+  .dashboard-panel {
+    @apply rounded-2xl border border-zinc-200/70 bg-white p-5 shadow-sm dark:border-zinc-800/80 dark:bg-zinc-950 sm:p-6;
+  }
+  .dashboard-panel--elevated {
+    box-shadow: 0 4px 24px -8px rgba(15, 23, 42, 0.08);
+  }
+  .dashboard-workspace-card {
+    @apply relative overflow-hidden;
+  }
+  .dashboard-workspace-card::before {
+    content: "";
+    @apply pointer-events-none absolute inset-0;
+    background: radial-gradient(ellipse 50% 40% at 0% 100%, rgba(85, 0, 31, 0.05), transparent 52%);
+  }
+  .dashboard-workspace-card::after {
+    content: "";
+    @apply pointer-events-none absolute inset-x-0 bottom-0 h-px;
+    background: linear-gradient(to right, transparent, rgba(85, 0, 31, 0.14), transparent);
+  }
+  .dashboard-workspace-wave {
+    @apply text-brand;
+  }
+  .dashboard-workspace-art {
+    @apply pointer-events-none absolute right-3 top-3 z-0 h-32 w-36 opacity-[0.55] sm:right-4 sm:top-4 sm:h-36 sm:w-40 sm:opacity-60 dark:opacity-45;
+  }
+  .dashboard-panel--flat {
+    @apply shadow-none;
+  }
+  .dashboard-stat-card {
+    @apply relative flex flex-col overflow-hidden rounded-xl border border-[#DFD2D8] bg-[#EDE5E8] px-3.5 py-3 shadow-none transition hover:border-brand/20 hover:bg-[#E8DFE3] dark:border-brand/20 dark:bg-brand/10 dark:hover:border-brand/35 dark:hover:bg-brand/15;
+  }
+  .dashboard-stat-card-glow {
+    @apply pointer-events-none absolute -right-4 -top-4 h-20 w-20 rounded-full bg-brand/10 opacity-50 blur-2xl transition group-hover:opacity-70 dark:bg-brand/20 dark:opacity-40;
+  }
+  .dashboard-stat-card-head {
+    @apply flex items-center justify-between gap-2;
+  }
+  .dashboard-stat-card-title {
+    @apply text-[13px] font-semibold leading-tight tracking-tight text-brand-ink dark:text-zinc-50;
+  }
+  .dashboard-stat-card-hint {
+    @apply mt-0.5 text-[10px] leading-snug text-[#8A7380] dark:text-zinc-400;
+  }
+  .dashboard-stat-card-icon {
+    @apply inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full;
+  }
+  .dashboard-stat-card-foot {
+    @apply mt-2.5;
+  }
+  .dashboard-stat-card-value {
+    @apply font-display text-[1.35rem] font-normal leading-none tabular-nums text-brand-ink dark:text-zinc-50;
+  }
+  .dashboard-stat-card-value-skeleton {
+    @apply inline-block h-6 w-8 animate-pulse rounded bg-brand/10 dark:bg-zinc-800;
+  }
+  .dashboard-btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-hover;
+  }
+  .dashboard-btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-5 py-2.5 text-sm font-semibold text-zinc-800 transition hover:border-brand/20 hover:bg-brand-soft/50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:border-brand/30 dark:hover:bg-brand/10;
+  }
+  .dashboard-icon-btn {
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand text-white shadow-sm transition hover:bg-brand-hover;
+  }
+  .dashboard-promo-card {
+    @apply min-h-[12rem] rounded-2xl bg-brand text-white;
+    box-shadow: 0 16px 40px -16px rgba(85, 0, 31, 0.55);
+  }
+  .dashboard-promo-wave {
+    @apply text-white;
+  }
+  .dashboard-promo-btn {
+    @apply inline-flex w-fit items-center justify-center rounded-xl bg-white px-5 py-2.5 text-sm font-semibold text-brand shadow-sm transition hover:bg-brand-soft;
+  }
+  .dashboard-promo-art {
+    @apply pointer-events-none absolute bottom-4 right-4 sm:bottom-5 sm:right-5;
+  }
+  .dashboard-promo-icon-ring {
+    @apply inline-flex h-[4.5rem] w-[4.5rem] items-center justify-center rounded-2xl bg-white/95 shadow-lg;
+  }
+  .dashboard-section-label {
+    @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500;
+  }
+  .dashboard-page-header {
+    @apply relative overflow-hidden rounded-2xl border border-zinc-200/70 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950;
+  }
+  .dashboard-page-header::before {
+    content: "";
+    @apply pointer-events-none absolute inset-0;
+    background:
+      radial-gradient(ellipse 80% 60% at 100% 0%, rgba(232, 153, 176, 0.18), transparent 55%),
+      radial-gradient(ellipse 50% 40% at 0% 100%, rgba(85, 0, 31, 0.06), transparent 50%),
+      radial-gradient(rgba(85, 0, 31, 0.04) 1px, transparent 1px);
+    background-size: auto, auto, 20px 20px;
+  }
+  .dashboard-page-header::after {
+    content: "";
+    @apply pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-brand/20 to-transparent;
+  }
+  .dashboard-page-header-glow {
+    @apply pointer-events-none absolute -right-12 -top-12 h-48 w-48 rounded-full bg-brand/10 blur-3xl dark:bg-brand/15;
+  }
+  .dashboard-page-header-art {
+    @apply pointer-events-none absolute right-3 top-3 z-[1] h-28 w-28 opacity-90 sm:right-5 sm:top-4 sm:h-36 sm:w-36 lg:h-[9.5rem] lg:w-[9.5rem] dark:opacity-80;
+  }
+  .dashboard-page-header--with-art .dashboard-page-header-inner {
+    @apply sm:pr-36 lg:pr-44;
+  }
+  .dashboard-page-header-inner {
+    @apply relative z-[2] px-5 py-5 sm:px-7 sm:py-6;
+  }
+  .dashboard-page-header-title {
+    @apply font-display text-[1.75rem] font-semibold tracking-tight text-zinc-900 sm:text-[2.25rem] dark:text-zinc-50;
+  }
+  .dashboard-page-header-description {
+    @apply mt-2.5 max-w-xl text-sm leading-relaxed text-zinc-500 dark:text-zinc-400;
+  }
+  .dashboard-page-header-chip {
+    @apply inline-flex items-center gap-2 rounded-full border border-brand/15 bg-white/80 px-3 py-1.5 text-xs font-medium text-brand-ink shadow-sm dark:border-brand/25 dark:bg-brand/10 dark:text-brand-on-dark;
+  }
+  .dashboard-page-header-stat {
+    @apply rounded-xl border border-zinc-200/80 bg-white/85 px-3 py-2.5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900/70;
+  }
+  .dashboard-page-header-cta {
+    @apply inline-flex shrink-0 items-center justify-center gap-2 rounded-full bg-brand px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-hover;
+  }
+  .dashboard-page-header-cta-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-full border border-zinc-300 bg-white px-3.5 py-2 text-sm font-semibold text-zinc-800 shadow-sm transition hover:border-brand/25 hover:bg-brand-soft/60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:border-brand/35;
+  }
+  .dashboard-page-header-panel {
+    @apply rounded-xl border border-zinc-200/80 bg-white/75 p-2.5 shadow-sm backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-900/50 sm:p-3;
+  }
   .marketing-container {
     @apply mx-auto w-full max-w-6xl px-4 sm:px-6 xl:max-w-7xl 2xl:max-w-[90rem];
+  }
+  .marketing-footer-link {
+    @apply inline-block py-1.5 text-sm text-[#E5E7EB]/85 transition hover:text-[#D5AE65] hover:underline underline-offset-[5px];
+  }
+  /* Prevent default blue link color flash on social SVGs before Tailwind hydrates */
+  .marketing-social-link,
+  .marketing-social-link:visited {
+    color: #0f172a;
+    text-decoration: none;
+  }
+  .marketing-social-link--footer,
+  .marketing-social-link--footer:visited {
+    color: #d5ae65;
   }
   .gallery-card-grid {
     @apply grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4;
   }
+  .gallery-card-grid-compact {
+    @apply grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6;
+  }
   .gallery-card-grid-loose {
     @apply grid gap-5 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4;
+  }
+  .dashboard-search-shell {
+    @apply min-w-0 flex-1 rounded-[2rem] bg-white px-4 py-3 shadow-[0_2px_12px_rgba(15,23,42,0.06)] dark:bg-zinc-950 dark:shadow-[0_2px_16px_rgba(0,0,0,0.28)];
   }
 }
 

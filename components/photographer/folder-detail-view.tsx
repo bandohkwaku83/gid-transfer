@@ -35,18 +35,36 @@ import { generateGalleryAccessPin } from "@/lib/gallery-access-pin";
 import {
   publicGalleryKeyFromToken,
   publicGallerySessionId,
+  withGalleryImageCacheBust,
 } from "@/lib/share-gallery-api";
 import { cn } from "@/lib/utils";
+import {
+  getGalleriesMeta,
+  getGalleryAnalytics,
+  resolveMetaBodyFonts,
+  resolveMetaCoverColorPresets,
+  resolveMetaCoverFrames,
+  resolveMetaGridLayouts,
+  resolveMetaTitleFonts,
+  type GalleriesMetaResponse,
+} from "@/lib/galleries-api";
 import { CoverFocalPreview } from "@/components/photographer/cover-focal-preview";
 import {
   FolderUploadBulkToolbar,
   FolderUploadEmptyState,
   FolderUploadMediaGrid,
+  FolderUploadOptionToggle,
   FolderUploadSectionHeader,
 } from "@/components/photographer/folder-upload-grid";
+import { GalleryDashboardPanel } from "@/components/photographer/gallery-dashboard-panel";
 import { CreateFolderModal } from "@/components/photographer/create-folder-modal";
 import { GallerySetBar } from "@/components/photographer/gallery-set-bar";
 import { UploadDragger } from "@/components/photographer/upload-dragger";
+import {
+  isFinalUploadableFile,
+  isRawUploadableFile,
+  RAW_UPLOAD_ACCEPT,
+} from "@/lib/upload-folder-files";
 import {
   DuplicateUploadConflictDialog,
   FALLBACK_COVER,
@@ -66,13 +84,25 @@ import {
 import {
   apiFolderMediaToDemoAsset,
   apiFolderMediaToFinal,
-  apiFolderStatusToUi,
+  demoAssetGridSrc,
+  isLocalDemoFolderId,
+} from "@/lib/folders/helpers";
+import {
+  galleryPhotoToApiFolderMedia,
+  galleryPhotosPendingDerivatives,
+  pollGalleryUploadDerivatives,
+  upsertGalleryUploadRows,
+  type GalleryUploadPhotosResult,
+} from "@/lib/gallery-media-api";
+import {
   extractFinalMediaList,
   extractRawMediaList,
   extractSelectionMediaList,
+  apiFolderStatusToUi,
   folderSelectionLimit,
   getFolder,
   getFolderClientName,
+  getFolderClientContact,
   getFolderCoverUrl,
   folderCoverObjectPositionStyle,
   FALLBACK_SHARE_EXPIRY_PRESETS,
@@ -82,11 +112,18 @@ import {
   getFolderShareAbsoluteUrl,
   getShareLinkExpiryPresets,
   incomingFilenamesConflictingWithFolder,
+  isGalleryPublished,
+  canActivateGalleryOnline,
+  galleryOnlineActivationHint,
   parseFolderCoverFocal,
   patchFolderFinalFeedbackReply,
   patchFolderSelectionFeedbackReply,
   patchFolderShare,
+  patchFolderDesignSettings,
+  patchFolderClientAccess,
   patchFolderStatus,
+  patchFolderUploadSettings,
+  patchFolderFinalSettings,
   deleteAllFolderFinalMedia,
   deleteAllFolderRawMedia,
   deleteFolder,
@@ -95,6 +132,11 @@ import {
   deleteFolderRawMedia,
   postFolderMediaDuplicatePreview,
   regenerateFolderShare,
+  revokeFolderShare,
+  reorderFolderFinalMedia,
+  reorderFolderRawMedia,
+  applyOrderByIds,
+  mergeVisibleOrder,
   lockFolderFinalDelivery,
   unlockFolderFinalDelivery,
   updateFolder,
@@ -112,8 +154,14 @@ import {
   type UploadFolderMediaFormOptions,
 } from "@/lib/folders-api";
 import { getDuplicateUploadPreference } from "@/lib/upload-preferences";
-import { coverColorsMatch, normalizeGalleryCoverColor } from "@/lib/gallery-cover-color";
+import {
+  coverColorsMatch,
+  normalizeGalleryCoverColor,
+  resolveGalleryCoverButtonColor,
+  resolveGalleryCoverTextColor,
+} from "@/lib/gallery-cover-color";
 import { normalizeGalleryCoverFrame, type GalleryCoverFrame } from "@/lib/gallery-cover-frame";
+import { normalizeGalleryImageLayout } from "@/lib/gallery-image-layout";
 import { getAuth } from "@/lib/auth-demo";
 import { STUDIO_NAME } from "@/lib/branding";
 import {
@@ -122,16 +170,32 @@ import {
   uploadSetIdForFilter,
   type GallerySetFilter,
 } from "@/lib/gallery-set-filter";
+import {
+  buildGalleryAnalyticsSnapshot,
+  collectGalleryActivityTimestamps,
+  mapGalleryAnalyticsToSnapshot,
+  type GalleryAnalyticsSnapshot,
+} from "@/lib/gallery-analytics";
+import { getSettings } from "@/lib/settings-api";
+import {
+  SETTINGS_PREREQUISITE_FOCUS,
+  folderEditorReturnUrl,
+  settingsPrerequisiteUrl,
+} from "@/lib/settings-prerequisite";
+// import { GalleryBlogEditorPanel } from "@/components/gallery-blog/gallery-blog-editor-panel";
+// import { listGalleryBlogPosts } from "@/lib/gallery-blog";
 
 function rawUploadFormOptions(
   duplicateAction: DuplicateUploadAction,
   setId?: string | null,
+  applyPreviewWatermark?: boolean,
 ): UploadFolderMediaFormOptions {
   const opts: UploadFolderMediaFormOptions = {
     duplicateAction,
     markUploadComplete: true,
   };
   if (setId !== undefined) opts.setId = setId;
+  if (applyPreviewWatermark !== undefined) opts.applyPreviewWatermark = applyPreviewWatermark;
   return opts;
 }
 
@@ -141,6 +205,7 @@ function finalUploadFormOptions(
   selectionMediaId: string | undefined,
   delivery: FinalDeliveryUploadFields,
   setId?: string | null,
+  applyWatermark?: boolean,
 ): UploadFolderFinalMediaFormOptions {
   const opts: UploadFolderFinalMediaFormOptions = {
     duplicateAction,
@@ -148,6 +213,7 @@ function finalUploadFormOptions(
     clientHasPaidForFinals: delivery.clientHasPaidForFinals,
   };
   if (setId !== undefined) opts.setId = setId;
+  if (applyWatermark !== undefined) opts.applyWatermark = applyWatermark;
   if (files.length === 1 && selectionMediaId) {
     opts.selectionMediaId = selectionMediaId;
   }
@@ -161,6 +227,19 @@ function finalUploadFormOptions(
 }
 
 const VIDEO_FILE_RE = /\.(mp4|mov|webm|m4v|avi|mkv|ogv)(?:[?#].*)?$/i;
+
+async function fetchMediaAsCoverFile(url: string, name: string): Promise<File> {
+  const response = await fetch(url, { credentials: "include" });
+  if (!response.ok) throw new Error("Could not load image.");
+  const blob = await response.blob();
+  if (!blob.type.startsWith("image/")) {
+    throw new Error("Cover must be a photo.");
+  }
+  const stem = name.replace(/\.[^.]+$/, "") || "cover";
+  const ext =
+    blob.type === "image/png" ? ".png" : blob.type === "image/webp" ? ".webp" : ".jpg";
+  return new File([blob], `${stem}${ext}`, { type: blob.type });
+}
 
 function isFolderMediaVideo(item: {
   isVideo?: boolean;
@@ -240,10 +319,11 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
   const { showToast } = useToast();
   const [origin, setOrigin] = useState("");
   const [folder, setFolder] = useState<ApiFolder | null>(null);
+  const [apiAnalytics, setApiAnalytics] = useState<GalleryAnalyticsSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("gallery");
-  const [previewLayout, setPreviewLayout] = useState<PreviewLayout>("masonry");
+  const [tab, setTab] = useState<Tab>("dashboard");
+  const [imageLayoutDraft, setImageLayoutDraft] = useState<PreviewLayout>("masonry");
   const [previewViewport, setPreviewViewport] = useState<PreviewViewport>("desktop");
   const [titleFontDraft, setTitleFontDraft] = useState("Playfair Display");
   const [bodyFontDraft, setBodyFontDraft] = useState("Inter");
@@ -268,26 +348,41 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     fileCount?: number;
   } | null>(null);
   const [expiryPresets, setExpiryPresets] = useState<ShareLinkExpiryPreset[]>([]);
+  const [galleriesMeta, setGalleriesMeta] = useState<GalleriesMetaResponse | null>(null);
   const [linkExpiry, setLinkExpiry] = useState("30d");
   const [selectionLimitDraft, setSelectionLimitDraft] = useState("");
   const [savingSelectionSettings, setSavingSelectionSettings] = useState(false);
   /** `"raw:${id}"` | `"final:${id}"` while a delete request is in flight */
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  /** `"raw:${id}"` | `"final:${id}"` while setting cover from a tile */
+  const [settingCoverKey, setSettingCoverKey] = useState<string | null>(null);
+  /** Client-side display order for raw uploads / finals (no API). */
+  const [rawOrderIds, setRawOrderIds] = useState<string[] | null>(null);
+  const [finalOrderIds, setFinalOrderIds] = useState<string[] | null>(null);
   const [selectedRawIds, setSelectedRawIds] = useState<Set<string>>(() => new Set());
   const [selectedFinalIds, setSelectedFinalIds] = useState<Set<string>>(() => new Set());
   const rawSelectAllRef = useRef<HTMLInputElement>(null);
   const finalSelectAllRef = useRef<HTMLInputElement>(null);
   const musicFileInputRef = useRef<HTMLInputElement>(null);
   const coverFileInputRef = useRef<HTMLInputElement>(null);
+  const derivativesPollAbortRef = useRef<AbortController | null>(null);
+  const derivativesBootstrappedRef = useRef<string | null>(null);
 
   const [focalEditOpen, setFocalEditOpen] = useState(false);
   const [focalDraft, setFocalDraft] = useState({ x: 50, y: 50 });
   const [coverFrameDraft, setCoverFrameDraft] = useState<GalleryCoverFrame>("full-bleed");
   const [coverColorDraft, setCoverColorDraft] = useState("#18181b");
+  const [coverTextColorDraft, setCoverTextColorDraft] = useState("#ffffff");
+  const [coverButtonColorDraft, setCoverButtonColorDraft] = useState("#ffffff");
   const [savingFocal, setSavingFocal] = useState(false);
   const [savingCoverFrame, setSavingCoverFrame] = useState(false);
+  const [savingImageLayout, setSavingImageLayout] = useState(false);
+  const [savingDesignFonts, setSavingDesignFonts] = useState(false);
+  const [accessPinBusy, setAccessPinBusy] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [coverBusy, setCoverBusy] = useState(false);
+  /** Bust Next/Image and browser cache when the cover file changes at the same URL. */
+  const [coverCacheBust, setCoverCacheBust] = useState<string | undefined>(undefined);
 
   /** After duplicate-preview: user chooses replace vs skip before uploading bytes. */
   const [musicBusy, setMusicBusy] = useState(false);
@@ -307,6 +402,12 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
   const [finalWizardStep, setFinalWizardStep] = useState<"choose" | "unpaid">("choose");
   const [finalWizardBalance, setFinalWizardBalance] = useState("");
   const [finalWizardLock, setFinalWizardLock] = useState(false);
+  const [rawUploadPreviewWatermark, setRawUploadPreviewWatermark] = useState(true);
+  const [finalUploadWatermark, setFinalUploadWatermark] = useState(false);
+  const [studioWatermarkPreview, setStudioWatermarkPreview] = useState<boolean | null>(null);
+  const [studioBrandWatermarkEnabled, setStudioBrandWatermarkEnabled] = useState<boolean | null>(null);
+  const [savingUploadWatermark, setSavingUploadWatermark] = useState(false);
+  const [savingFinalWatermark, setSavingFinalWatermark] = useState(false);
   const [unlockingFinals, setUnlockingFinals] = useState(false);
   const [lockFinalDeliveryOpen, setLockFinalDeliveryOpen] = useState(false);
   const [lockFinalDeliveryAmount, setLockFinalDeliveryAmount] = useState("");
@@ -316,24 +417,233 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     queueMicrotask(() => setOrigin(typeof window !== "undefined" ? window.location.origin : ""));
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const tabParam = new URLSearchParams(window.location.search).get("tab");
+    if (
+      tabParam === "dashboard" ||
+      tabParam === "gallery" ||
+      tabParam === "uploads" ||
+      tabParam === "selection" ||
+      tabParam === "finals" ||
+      tabParam === "blog"
+    ) {
+      setTab(tabParam);
+    }
+  }, [folderId]);
+
+  const refreshStudioWatermarkSettings = useCallback(() => {
+    void getSettings().then((settings) => {
+      setStudioWatermarkPreview(settings.watermarkPreviewImages);
+      setStudioBrandWatermarkEnabled(settings.brandWatermark.enabled);
+    });
+  }, []);
+
+  const effectiveRawUploadPreviewWatermark =
+    studioWatermarkPreview !== false && rawUploadPreviewWatermark;
+  const effectiveFinalUploadWatermark =
+    studioBrandWatermarkEnabled !== false && finalUploadWatermark;
+
+  useEffect(() => {
+    refreshStudioWatermarkSettings();
+  }, [refreshStudioWatermarkSettings]);
+
+  useEffect(() => {
+    function onFocus() {
+      refreshStudioWatermarkSettings();
+    }
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshStudioWatermarkSettings]);
+
+  useEffect(() => {
+    if (folder) {
+      if (folder.watermarkPreviewEnabled !== undefined) {
+        setRawUploadPreviewWatermark(folder.watermarkPreviewEnabled);
+      }
+      if (folder.watermarkFinalsEnabled !== undefined) {
+        setFinalUploadWatermark(folder.watermarkFinalsEnabled);
+      }
+      return;
+    }
+    let cancelled = false;
+    void getSettings().then((settings) => {
+      if (cancelled) return;
+      setRawUploadPreviewWatermark(settings.watermarkPreviewImages);
+      setFinalUploadWatermark(settings.brandWatermark.enabled);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [folder?._id, folder?.watermarkPreviewEnabled, folder?.watermarkFinalsEnabled]);
+
+  const goToPreviewWatermarkSettings = useCallback(() => {
+    router.push(
+      settingsPrerequisiteUrl({
+        tab: "gallery",
+        returnTo: folderEditorReturnUrl(folderId, "uploads"),
+        focus: SETTINGS_PREREQUISITE_FOCUS.watermarkPreview,
+      }),
+    );
+  }, [folderId, router]);
+
+  const goToBrandWatermarkSettings = useCallback(() => {
+    router.push(
+      settingsPrerequisiteUrl({
+        tab: "watermark",
+        returnTo: folderEditorReturnUrl(folderId, "finals"),
+        focus: SETTINGS_PREREQUISITE_FOCUS.brandWatermark,
+      }),
+    );
+  }, [folderId, router]);
+
+  const onRawUploadWatermarkChange = useCallback(
+    async (checked: boolean) => {
+      if (checked && studioWatermarkPreview === false) {
+        goToPreviewWatermarkSettings();
+        return;
+      }
+      const previous = rawUploadPreviewWatermark;
+      setRawUploadPreviewWatermark(checked);
+      setSavingUploadWatermark(true);
+      try {
+        const updated = await patchFolderUploadSettings(folderId, {
+          watermarkPreviewEnabled: checked,
+        });
+        setFolder(updated);
+      } catch (err) {
+        setRawUploadPreviewWatermark(previous);
+        showToast(
+          err instanceof Error ? err.message : "Could not update preview watermark setting.",
+          "error",
+        );
+      } finally {
+        setSavingUploadWatermark(false);
+      }
+    },
+    [folderId, goToPreviewWatermarkSettings, rawUploadPreviewWatermark, showToast, studioWatermarkPreview],
+  );
+
+  const onFinalUploadWatermarkChange = useCallback(
+    async (checked: boolean) => {
+      if (checked && studioBrandWatermarkEnabled === false) {
+        goToBrandWatermarkSettings();
+        return;
+      }
+      const previous = finalUploadWatermark;
+      setFinalUploadWatermark(checked);
+      setSavingFinalWatermark(true);
+      try {
+        const updated = await patchFolderFinalSettings(folderId, {
+          watermarkFinalsEnabled: checked,
+        });
+        setFolder(updated);
+      } catch (err) {
+        setFinalUploadWatermark(previous);
+        showToast(
+          err instanceof Error ? err.message : "Could not update final watermark setting.",
+          "error",
+        );
+      } finally {
+        setSavingFinalWatermark(false);
+      }
+    },
+    [folderId, finalUploadWatermark, goToBrandWatermarkSettings, showToast, studioBrandWatermarkEnabled],
+  );
+
+  const loadGalleryAnalytics = useCallback(async (id: string) => {
+    try {
+      const data = await getGalleryAnalytics(id);
+      setApiAnalytics(mapGalleryAnalyticsToSnapshot(data));
+    } catch {
+      setApiAnalytics(null);
+    }
+  }, []);
+
   const refreshFolder = useCallback(async () => {
     const f = await getFolder(folderId);
     setFolder(f);
+    void loadGalleryAnalytics(folderId);
     return f;
+  }, [folderId, loadGalleryAnalytics]);
+
+  const mergeRawUploadRows = useCallback(
+    (rows: ReturnType<typeof galleryPhotoToApiFolderMedia>[]) => {
+      setFolder((prev) => {
+        if (!prev || rows.length === 0) return prev;
+        return {
+          ...prev,
+          uploads: upsertGalleryUploadRows(extractRawMediaList(prev), rows),
+        };
+      });
+    },
+    [],
+  );
+
+  const startDerivativesPolling = useCallback(
+    (photoIds: string[]) => {
+      if (photoIds.length === 0 || isLocalDemoFolderId(folderId)) return;
+      derivativesPollAbortRef.current?.abort();
+      const ac = new AbortController();
+      derivativesPollAbortRef.current = ac;
+      void pollGalleryUploadDerivatives(
+        folderId,
+        photoIds,
+        (photo) => {
+          mergeRawUploadRows([galleryPhotoToApiFolderMedia(photo)]);
+        },
+        ac.signal,
+      ).catch(() => {});
+    },
+    [folderId, mergeRawUploadRows],
+  );
+
+  const applyRawUploadComplete = useCallback(
+    (body: unknown) => {
+      if (!body || typeof body !== "object") return;
+      const result = body as GalleryUploadPhotosResult;
+      const photos = [...(result.created ?? []), ...(result.replaced ?? [])];
+      if (photos.length === 0) return;
+      mergeRawUploadRows(photos.map(galleryPhotoToApiFolderMedia));
+      startDerivativesPolling(galleryPhotosPendingDerivatives(photos));
+    },
+    [mergeRawUploadRows, startDerivativesPolling],
+  );
+
+  useEffect(() => () => derivativesPollAbortRef.current?.abort(), []);
+
+  useEffect(() => {
+    derivativesBootstrappedRef.current = null;
+    derivativesPollAbortRef.current?.abort();
   }, [folderId]);
+
+  useEffect(() => {
+    if (!folder || isLocalDemoFolderId(folder._id)) return;
+    if (derivativesBootstrappedRef.current === folder._id) return;
+    derivativesBootstrappedRef.current = folder._id;
+    const pending = extractRawMediaList(folder)
+      .filter((m) => m.derivativesReady === false)
+      .map((m) => String(m.id ?? m._id ?? ""))
+      .filter(Boolean);
+    if (pending.length > 0) startDerivativesPolling(pending);
+  }, [folder, startDerivativesPolling]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setApiAnalytics(null);
     (async () => {
       try {
-        const [f, presets] = await Promise.all([
+        const [f, presets, meta] = await Promise.all([
           getFolder(folderId),
           getShareLinkExpiryPresets().catch(() => [] as ShareLinkExpiryPreset[]),
+          getGalleriesMeta().catch(() => null),
         ]);
         if (cancelled) return;
         setFolder(f);
+        void loadGalleryAnalytics(folderId);
+        setGalleriesMeta(meta);
         const list = presets.length > 0 ? presets : FALLBACK_SHARE_EXPIRY_PRESETS;
         setExpiryPresets(list);
         const ids = list.map((p) => p.id);
@@ -355,7 +665,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [folderId]);
+  }, [folderId, loadGalleryAnalytics]);
 
   useEffect(() => {
     setFocalEditOpen(false);
@@ -369,7 +679,31 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     const limit = folderSelectionLimit(folder);
     setSelectionLimitDraft(limit != null ? String(limit) : "");
     setCoverFrameDraft(normalizeGalleryCoverFrame(folder.coverFrame));
-    setCoverColorDraft(normalizeGalleryCoverColor(folder.coverColor));
+    const nextCoverColor = normalizeGalleryCoverColor(folder.coverColor);
+    setCoverColorDraft(nextCoverColor);
+    setCoverTextColorDraft(
+      folder.coverTextColor?.trim()
+        ? normalizeGalleryCoverColor(folder.coverTextColor)
+        : resolveGalleryCoverTextColor(nextCoverColor),
+    );
+    setCoverButtonColorDraft(
+      folder.coverButtonColor?.trim()
+        ? normalizeGalleryCoverColor(folder.coverButtonColor)
+        : resolveGalleryCoverButtonColor(nextCoverColor),
+    );
+    setImageLayoutDraft(
+      normalizeGalleryImageLayout(folder.imageLayout ?? "masonry"),
+    );
+    setTitleFontDraft(folder.titleFont?.trim() || "Playfair Display");
+    setBodyFontDraft(folder.bodyFont?.trim() || "Inter");
+    if (folder.allowDownloads !== undefined) {
+      setAllowDownloadsDraft(folder.allowDownloads);
+    }
+    const override = getFolderOverride(folder._id);
+    setPasswordProtectionDraft(folder.sharePasswordEnabled ?? override?.sharePasswordEnabled ?? false);
+    if (override?.shareAccessPin) {
+      setGalleryAccessPinDraft(override.shareAccessPin);
+    }
   }, [folder]);
 
   const shareAccessSessionId = useMemo(() => {
@@ -378,48 +712,106 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     return publicGallerySessionId(publicGalleryKeyFromToken(code));
   }, [folder?.share?.code]);
 
-  useEffect(() => {
-    if (!folder) return;
-    const o = getFolderOverride(folder._id);
-    if (o?.sharePasswordEnabled != null) {
-      setPasswordProtectionDraft(o.sharePasswordEnabled);
-    }
-    if (o?.shareAccessPin) {
-      setGalleryAccessPinDraft(o.shareAccessPin);
-    }
-  }, [folder?._id]);
+  const coverFrameOptions = useMemo(
+    () => resolveMetaCoverFrames(galleriesMeta),
+    [galleriesMeta],
+  );
+  const gridLayoutOptions = useMemo(
+    () => resolveMetaGridLayouts(galleriesMeta),
+    [galleriesMeta],
+  );
+  const coverColorPresets = useMemo(
+    () => resolveMetaCoverColorPresets(galleriesMeta),
+    [galleriesMeta],
+  );
+  const titleFontOptions = useMemo(
+    () => resolveMetaTitleFonts(galleriesMeta),
+    [galleriesMeta],
+  );
+  const bodyFontOptions = useMemo(
+    () => resolveMetaBodyFonts(galleriesMeta),
+    [galleriesMeta],
+  );
 
-  useEffect(() => {
-    if (!folder || !shareAccessSessionId) return;
-    const pin =
-      galleryAccessPinDraft ||
-      (passwordProtectionDraft ? generateGalleryAccessPin() : "");
-    if (passwordProtectionDraft && !galleryAccessPinDraft && pin) {
-      setGalleryAccessPinDraft(pin);
-    }
-    writeGalleryAccessClientConfig(shareAccessSessionId, {
-      enabled: passwordProtectionDraft,
-      pin,
-    });
-    patchFolderOverride(folder._id, {
-      sharePasswordEnabled: passwordProtectionDraft,
-      ...(pin ? { shareAccessPin: pin } : {}),
-    });
-  }, [folder, shareAccessSessionId, passwordProtectionDraft, galleryAccessPinDraft]);
+  const syncShareAccessPreview = useCallback(
+    (enabled: boolean, pin: string) => {
+      if (!folder || !shareAccessSessionId) return;
+      writeGalleryAccessClientConfig(shareAccessSessionId, {
+        enabled,
+        pin,
+      });
+      patchFolderOverride(folder._id, {
+        sharePasswordEnabled: enabled,
+        ...(pin ? { shareAccessPin: pin } : {}),
+      });
+    },
+    [folder, shareAccessSessionId],
+  );
 
-  const onPasswordProtectionChange = useCallback((enabled: boolean) => {
-    setPasswordProtectionDraft(enabled);
-    if (enabled) {
-      setGalleryAccessPinDraft((prev) => prev || generateGalleryAccessPin());
-    }
-    setAccessPinCopied(false);
-  }, []);
+  const saveClientAccess = useCallback(
+    async (patch: {
+      passwordProtected?: boolean;
+      password?: string;
+      allowDownloads?: boolean;
+    }) => {
+      if (!folder) return;
+      setAccessPinBusy(true);
+      try {
+        const updated = await patchFolderClientAccess(folder._id, patch);
+        setFolder(updated);
+        if (patch.passwordProtected !== undefined || patch.password !== undefined) {
+          const enabled =
+            patch.passwordProtected ?? updated.sharePasswordEnabled ?? false;
+          const pin = patch.password ?? galleryAccessPinDraft;
+          syncShareAccessPreview(enabled, pin);
+        }
+      } catch (e) {
+        showToast(
+          e instanceof FoldersApiError
+            ? e.message
+            : e instanceof Error
+              ? e.message
+              : "Could not update client access.",
+          "error",
+        );
+      } finally {
+        setAccessPinBusy(false);
+      }
+    },
+    [folder, galleryAccessPinDraft, showToast, syncShareAccessPreview],
+  );
+
+  const onPasswordProtectionChange = useCallback(
+    (enabled: boolean) => {
+      setPasswordProtectionDraft(enabled);
+      const pin = enabled ? galleryAccessPinDraft || generateGalleryAccessPin() : "";
+      if (enabled && pin) {
+        setGalleryAccessPinDraft(pin);
+      }
+      setAccessPinCopied(false);
+      void saveClientAccess({
+        passwordProtected: enabled,
+        ...(enabled && pin ? { password: pin } : {}),
+      });
+    },
+    [galleryAccessPinDraft, saveClientAccess],
+  );
 
   const onRegenerateAccessPin = useCallback(() => {
-    setGalleryAccessPinDraft(generateGalleryAccessPin());
+    const pin = generateGalleryAccessPin();
+    setGalleryAccessPinDraft(pin);
     setAccessPinCopied(false);
     showToast("New access code generated.", "success");
-  }, [showToast]);
+    void saveClientAccess({ passwordProtected: true, password: pin });
+  }, [saveClientAccess, showToast]);
+
+  const onAllowDownloadsChange = useCallback(
+    (next: boolean) => {
+      setAllowDownloadsDraft(next);
+      void saveClientAccess({ allowDownloads: next });
+    },
+    [saveClientAccess],
+  );
 
   const onCopyAccessPin = useCallback(async () => {
     const pin = galleryAccessPinDraft;
@@ -434,13 +826,24 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     }
   }, [galleryAccessPinDraft, showToast]);
 
-  const shareUrl = useMemo(
-    () =>
-      folder && origin ? getFolderShareAbsoluteUrl(folder, origin) ?? "" : "",
-    [folder, origin],
+  const shareUrl = useMemo(() => {
+    if (!folder) return "";
+    const raw = folder.shareUrl?.trim() ?? "";
+    if (!raw) return "";
+    // Share links from the API are already in the correct format (tenant route).
+    // Only assemble when the API gave us a relative path.
+    if (/^https?:\/\//i.test(raw)) return raw;
+    if (origin) return getFolderShareAbsoluteUrl(folder, origin) ?? raw;
+    return raw;
+  }, [folder, origin]);
+  const shareActive = useMemo(
+    () => (folder ? isGalleryPublished(folder) : false),
+    [folder],
   );
-  const shareActive = Boolean(
-    folder && folder.share?.enabled !== false && shareUrl,
+
+  const galleryOnlineHint = useMemo(
+    () => (folder ? galleryOnlineActivationHint(folder) : "Turn on to publish the client link."),
+    [folder],
   );
 
   const folderStatus = useMemo(
@@ -448,15 +851,20 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     [folder],
   );
 
-  const rawAssets = useMemo(
-    () => (folder ? extractRawMediaList(folder).map(apiFolderMediaToDemoAsset) : []),
-    [folder],
-  );
+  useEffect(() => {
+    setRawOrderIds(null);
+    setFinalOrderIds(null);
+  }, [folderId]);
 
-  const finalAssets = useMemo(
-    () => (folder ? extractFinalMediaList(folder).map(apiFolderMediaToFinal) : []),
-    [folder],
-  );
+  const rawAssets = useMemo(() => {
+    const base = folder ? extractRawMediaList(folder).map(apiFolderMediaToDemoAsset) : [];
+    return rawOrderIds ? applyOrderByIds(base, rawOrderIds) : base;
+  }, [folder, rawOrderIds]);
+
+  const finalAssets = useMemo(() => {
+    const base = folder ? extractFinalMediaList(folder).map(apiFolderMediaToFinal) : [];
+    return finalOrderIds ? applyOrderByIds(base, finalOrderIds) : base;
+  }, [folder, finalOrderIds]);
 
   const flaggedFinalItems = useMemo(
     () => {
@@ -502,6 +910,30 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     () => clientSelectedAssets.filter((a) => (a.clientComment ?? "").trim().length > 0),
     [clientSelectedAssets],
   );
+
+  const galleryPublished = useMemo(
+    () => (folder ? isGalleryPublished(folder) : false),
+    [folder],
+  );
+
+  const fallbackGalleryAnalytics = useMemo(
+    () =>
+      buildGalleryAnalyticsSnapshot({
+        viewCount: Number(folder?.share?.viewCount ?? 0),
+        downloadCount: Number(folder?.share?.downloadCount ?? 0),
+        uploadsCount: rawAssets.length,
+        selectionsCount: clientSelectedAssets.length,
+        finalsCount: finalAssets.length,
+        activityTimestamps: collectGalleryActivityTimestamps(
+          folder,
+          clientSelectedAssets.map((a) => a.selectedAt),
+        ),
+        referenceIso: folder?.updatedAt ?? null,
+      }),
+    [folder, rawAssets.length, clientSelectedAssets, finalAssets.length],
+  );
+
+  const galleryAnalytics = apiAnalytics ?? fallbackGalleryAnalytics;
 
   const filteredSelectionAssets = useMemo(() => {
     if (selectionFilter === "comments") return selectionWithComments;
@@ -685,7 +1117,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
       return filteredRawAssets.map((a) => ({
         id: a.id,
         name: a.originalName,
-        src: a.previewUrl ?? a.thumbUrl,
+        src: demoAssetGridSrc(a),
         isVideo: isFolderMediaVideo(a),
       }));
     }
@@ -693,7 +1125,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
       return filteredSelectionBySet.map((a) => ({
         id: a.id,
         name: a.originalName,
-        src: a.previewUrl ?? a.thumbUrl,
+        src: demoAssetGridSrc(a),
         isVideo: isFolderMediaVideo(a),
       }));
     }
@@ -866,9 +1298,10 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
         selectionMediaId,
         d ?? { clientHasPaidForFinals: true },
         resolveUploadSetId(),
+        effectiveFinalUploadWatermark,
       );
     },
-    [resolveUploadSetId],
+    [effectiveFinalUploadWatermark, resolveUploadSetId],
   );
 
   function openFinalUploadWizard(files: File[]) {
@@ -1016,13 +1449,14 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
         fileIndex: 1,
         fileCount: files.length,
       });
-      await uploadFolderRawMedia(
+      const uploadResult = await uploadFolderRawMedia(
         folder._id,
         files,
         uploadProgressHandler("raw"),
-        rawUploadFormOptions(getDuplicateUploadPreference(), setId),
+        rawUploadFormOptions(getDuplicateUploadPreference(), setId, effectiveRawUploadPreviewWatermark),
       );
-      await refreshFolder();
+      applyRawUploadComplete(uploadResult?.lastBody);
+      void refreshFolder();
       showToast(`${files.length} file(s) uploaded.`, "success");
     } catch (e) {
       showToast(e instanceof Error ? e.message : "Upload failed.", "error");
@@ -1054,12 +1488,14 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     });
     try {
       if (p.kind === "raw") {
-        await uploadFolderRawMedia(
+        const uploadResult = await uploadFolderRawMedia(
           folder._id,
           p.files,
           uploadProgressHandler("raw"),
-          rawUploadFormOptions("replace", resolveUploadSetId()),
+          rawUploadFormOptions("replace", resolveUploadSetId(), effectiveRawUploadPreviewWatermark),
         );
+        applyRawUploadComplete(uploadResult?.lastBody);
+        void refreshFolder();
       } else {
         await uploadFolderFinalMedia(
           folder._id,
@@ -1067,8 +1503,8 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
           uploadProgressHandler("final"),
           mergeFinalFormOpts("replace", p.files, p.selectionMediaId),
         );
+        await refreshFolder();
       }
-      await refreshFolder();
       showToast(
         p.kind === "raw"
           ? `${p.files.length} file(s) uploaded (replacing matching names).`
@@ -1127,9 +1563,11 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
           folder._id,
           filesToUpload,
           uploadProgressHandler("raw"),
-          rawUploadFormOptions("ignore", resolveUploadSetId()),
+          rawUploadFormOptions("ignore", resolveUploadSetId(), effectiveRawUploadPreviewWatermark),
         );
+        applyRawUploadComplete(result?.lastBody);
         ignored = result?.ignoredDuplicatesCount ?? 0;
+        void refreshFolder();
       } else {
         const result = await uploadFolderFinalMedia(
           folder._id,
@@ -1138,8 +1576,8 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
           mergeFinalFormOpts("ignore", filesToUpload, p.selectionMediaId),
         );
         ignored = result?.ignoredDuplicatesCount ?? 0;
+        await refreshFolder();
       }
-      await refreshFolder();
       if (skippedWithoutUpload > 0) {
         showToast(
           ignored > 0
@@ -1176,14 +1614,55 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     if (!folder || busy) return;
     setBusy(true);
     try {
-      const updated = await regenerateFolderShare(folder._id, {
+      const { folder: updated, smsError } = await regenerateFolderShare(folder._id, {
         clearSlug: false,
         linkExpiry: linkExpiry || undefined,
       });
       setFolder(updated);
-      showToast("Share link regenerated.", "success");
+      if (smsError?.message?.trim()) {
+        showToast(`Link created, but SMS failed: ${smsError.message.trim()}`, "info");
+      } else {
+        showToast("Share link regenerated.", "success");
+      }
     } catch (e) {
       showToast(e instanceof Error ? e.message : "Could not regenerate link.", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onToggleGalleryOnline(
+    nextOnline: boolean,
+    options?: { notifyClientViaSms?: boolean },
+  ) {
+    if (!folder || busy) return;
+    if (nextOnline && !canActivateGalleryOnline(folder)) {
+      showToast(galleryOnlineActivationHint(folder), "error");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = nextOnline
+        ? await regenerateFolderShare(folder._id, {
+            clearSlug: false,
+            linkExpiry: linkExpiry || undefined,
+            notifyClientViaSms: options?.notifyClientViaSms,
+          })
+        : { folder: await revokeFolderShare(folder._id) };
+      setFolder(result.folder);
+      if (nextOnline && result.smsError?.message?.trim()) {
+        showToast(`Gallery is online, but SMS failed: ${result.smsError.message.trim()}`, "info");
+      } else {
+        showToast(
+          nextOnline ? "Gallery is now online." : "Gallery is now offline.",
+          "success",
+        );
+      }
+    } catch (e) {
+      showToast(
+        e instanceof Error ? e.message : "Could not update gallery status.",
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -1312,11 +1791,15 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     if (!folder || savingCoverFrame) return;
     const nextFrame = normalizeGalleryCoverFrame(coverFrameDraft);
     const nextColor = normalizeGalleryCoverColor(coverColorDraft);
+    const nextTextColor = normalizeGalleryCoverColor(coverTextColorDraft);
+    const nextButtonColor = normalizeGalleryCoverColor(coverButtonColorDraft);
     setSavingCoverFrame(true);
     try {
-      const updated = await updateFolder(folder._id, {
+      const updated = await patchFolderDesignSettings(folder._id, {
         coverFrame: nextFrame,
         coverColor: nextColor,
+        coverTextColor: nextTextColor,
+        coverButtonColor: nextButtonColor,
       });
       setFolder(updated);
       if (!options?.silent) {
@@ -1334,17 +1817,25 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     } finally {
       setSavingCoverFrame(false);
     }
-  }, [folder, savingCoverFrame, coverFrameDraft, coverColorDraft, showToast]);
+  }, [folder, savingCoverFrame, coverFrameDraft, coverColorDraft, coverTextColorDraft, coverButtonColorDraft, showToast]);
 
   const coverStyleDirtyForSave = useMemo(() => {
     if (!folder) return false;
     const activeFrame = normalizeGalleryCoverFrame(folder.coverFrame);
     const activeColor = normalizeGalleryCoverColor(folder.coverColor);
+    const activeTextColor = folder.coverTextColor?.trim()
+      ? normalizeGalleryCoverColor(folder.coverTextColor)
+      : resolveGalleryCoverTextColor(activeColor);
+    const activeButtonColor = folder.coverButtonColor?.trim()
+      ? normalizeGalleryCoverColor(folder.coverButtonColor)
+      : resolveGalleryCoverButtonColor(activeColor);
     return (
       coverFrameDraft !== activeFrame ||
-      !coverColorsMatch(coverColorDraft, activeColor)
+      !coverColorsMatch(coverColorDraft, activeColor) ||
+      !coverColorsMatch(coverTextColorDraft, activeTextColor) ||
+      !coverColorsMatch(coverButtonColorDraft, activeButtonColor)
     );
-  }, [folder, coverFrameDraft, coverColorDraft]);
+  }, [folder, coverFrameDraft, coverColorDraft, coverTextColorDraft, coverButtonColorDraft]);
 
   useEffect(() => {
     if (!folder || !coverStyleDirtyForSave || savingCoverFrame || focalEditOpen) return;
@@ -1358,6 +1849,107 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
     savingCoverFrame,
     focalEditOpen,
     saveCoverFrame,
+  ]);
+
+  const saveImageLayout = useCallback(async (options?: { silent?: boolean }) => {
+    if (!folder || savingImageLayout) return;
+    const nextLayout = normalizeGalleryImageLayout(imageLayoutDraft);
+    setSavingImageLayout(true);
+    try {
+      const updated = await patchFolderDesignSettings(folder._id, {
+        imageLayout: nextLayout,
+      });
+      setFolder(updated);
+      if (!options?.silent) {
+        showToast("Client grid layout saved.", "success");
+      }
+    } catch (e) {
+      showToast(
+        e instanceof FoldersApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Could not save grid layout.",
+        "error",
+      );
+    } finally {
+      setSavingImageLayout(false);
+    }
+  }, [folder, savingImageLayout, imageLayoutDraft, showToast]);
+
+  const imageLayoutDirtyForSave = useMemo(() => {
+    if (!folder) return false;
+    const active = normalizeGalleryImageLayout(folder.imageLayout ?? "masonry");
+    return normalizeGalleryImageLayout(imageLayoutDraft) !== active;
+  }, [folder, imageLayoutDraft]);
+
+  useEffect(() => {
+    if (!folder || !imageLayoutDirtyForSave || savingImageLayout || focalEditOpen) return;
+    const timer = window.setTimeout(() => {
+      void saveImageLayout({ silent: true });
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [
+    folder,
+    imageLayoutDirtyForSave,
+    savingImageLayout,
+    focalEditOpen,
+    saveImageLayout,
+  ]);
+
+  const saveDesignFonts = useCallback(async (options?: { silent?: boolean }) => {
+    if (!folder || savingDesignFonts) return;
+    const nextTitle = titleFontDraft.trim() || "Playfair Display";
+    const nextBody = bodyFontDraft.trim() || "Inter";
+    const activeTitle = folder.titleFont?.trim() || "Playfair Display";
+    const activeBody = folder.bodyFont?.trim() || "Inter";
+    if (nextTitle === activeTitle && nextBody === activeBody) return;
+
+    setSavingDesignFonts(true);
+    try {
+      const updated = await patchFolderDesignSettings(folder._id, {
+        titleFont: nextTitle,
+        bodyFont: nextBody,
+      });
+      setFolder(updated);
+      if (!options?.silent) {
+        showToast("Typography saved.", "success");
+      }
+    } catch (e) {
+      showToast(
+        e instanceof FoldersApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Could not save typography.",
+        "error",
+      );
+    } finally {
+      setSavingDesignFonts(false);
+    }
+  }, [folder, savingDesignFonts, titleFontDraft, bodyFontDraft, showToast]);
+
+  const designFontsDirtyForSave = useMemo(() => {
+    if (!folder) return false;
+    const activeTitle = folder.titleFont?.trim() || "Playfair Display";
+    const activeBody = folder.bodyFont?.trim() || "Inter";
+    const nextTitle = titleFontDraft.trim() || "Playfair Display";
+    const nextBody = bodyFontDraft.trim() || "Inter";
+    return nextTitle !== activeTitle || nextBody !== activeBody;
+  }, [folder, titleFontDraft, bodyFontDraft]);
+
+  useEffect(() => {
+    if (!folder || !designFontsDirtyForSave || savingDesignFonts || focalEditOpen) return;
+    const timer = window.setTimeout(() => {
+      void saveDesignFonts({ silent: true });
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [
+    folder,
+    designFontsDirtyForSave,
+    savingDesignFonts,
+    focalEditOpen,
+    saveDesignFonts,
   ]);
 
   function cancelFocalEditor() {
@@ -1384,6 +1976,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
       });
       setFolder(updated);
       setFocalDraft(parseFolderCoverFocal(updated));
+      setCoverCacheBust(String(Date.now()));
       showToast("Cover image updated.", "success");
     } catch (e) {
       showToast(
@@ -1396,6 +1989,92 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
       );
     } finally {
       setCoverBusy(false);
+    }
+  }
+
+  async function onSetCoverFromMedia(mediaId: string, source: "raw" | "final") {
+    if (!folder || coverBusy || settingCoverKey) return;
+
+    if (source === "raw") {
+      const asset = rawAssets.find((item) => item.id === mediaId);
+      if (!asset) return;
+      if (isFolderMediaVideo(asset)) {
+        showToast("Cover must be a photo.", "error");
+        return;
+      }
+      const url = asset.previewUrl ?? asset.thumbUrl;
+      if (!url) {
+        showToast("Could not load image for cover.", "error");
+        return;
+      }
+
+      setSettingCoverKey(`raw:${mediaId}`);
+      setCoverBusy(true);
+      try {
+        const file = await fetchMediaAsCoverFile(url, asset.originalName);
+        const updated = await updateFolder(folder._id, {
+          coverImage: file,
+          useDefaultCover: false,
+          coverFocalX: 50,
+          coverFocalY: 50,
+        });
+        setFolder(updated);
+        setFocalDraft(parseFolderCoverFocal(updated));
+        setCoverCacheBust(String(Date.now()));
+        showToast("Cover image updated.", "success");
+      } catch (e) {
+        showToast(
+          e instanceof FoldersApiError
+            ? e.message
+            : e instanceof Error
+              ? e.message
+              : "Could not update cover image.",
+          "error",
+        );
+      } finally {
+        setCoverBusy(false);
+        setSettingCoverKey(null);
+      }
+      return;
+    }
+
+    const asset = finalAssets.find((item) => item.id === mediaId);
+    if (!asset) return;
+    if (isFolderMediaVideo(asset)) {
+      showToast("Cover must be a photo.", "error");
+      return;
+    }
+    if (!asset.url) {
+      showToast("Could not load image for cover.", "error");
+      return;
+    }
+
+    setSettingCoverKey(`final:${mediaId}`);
+    setCoverBusy(true);
+    try {
+      const file = await fetchMediaAsCoverFile(asset.url, asset.name);
+      const updated = await updateFolder(folder._id, {
+        coverImage: file,
+        useDefaultCover: false,
+        coverFocalX: 50,
+        coverFocalY: 50,
+      });
+      setFolder(updated);
+      setFocalDraft(parseFolderCoverFocal(updated));
+      setCoverCacheBust(String(Date.now()));
+      showToast("Cover image updated.", "success");
+    } catch (e) {
+      showToast(
+        e instanceof FoldersApiError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : "Could not update cover image.",
+        "error",
+      );
+    } finally {
+      setCoverBusy(false);
+      setSettingCoverKey(null);
     }
   }
 
@@ -1467,7 +2146,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
   }
 
   function mediaDeleteBlocked() {
-    return busy || uploadProgress !== null || deletingKey !== null;
+    return busy || uploadProgress !== null || deletingKey !== null || settingCoverKey !== null;
   }
 
   function toggleRawSelected(mediaId: string) {
@@ -1503,6 +2182,66 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
       select ? new Set(filteredFinalAssets.map((f) => f.id)) : new Set(),
     );
   }
+
+  const onReorderRawMedia = useCallback(
+    (visibleOrderedIds: string[]) => {
+      if (!folder || mediaDeleteBlocked() || busy) return;
+      const previousOrder =
+        rawOrderIds ?? rawAssets.map((asset) => asset.id);
+      const nextOrder = mergeVisibleOrder(previousOrder, visibleOrderedIds);
+      if (nextOrder.join("|") === previousOrder.join("|")) return;
+
+      setRawOrderIds(nextOrder);
+      void (async () => {
+        try {
+          const updated = await reorderFolderRawMedia(folder._id, nextOrder);
+          setFolder(updated);
+          setRawOrderIds(null);
+        } catch (e) {
+          setRawOrderIds(previousOrder);
+          showToast(
+            e instanceof FoldersApiError
+              ? e.message
+              : e instanceof Error
+                ? e.message
+                : "Could not save photo order.",
+            "error",
+          );
+        }
+      })();
+    },
+    [busy, folder, rawAssets, rawOrderIds, mediaDeleteBlocked, showToast],
+  );
+
+  const onReorderFinalMedia = useCallback(
+    (visibleOrderedIds: string[]) => {
+      if (!folder || mediaDeleteBlocked() || busy) return;
+      const previousOrder =
+        finalOrderIds ?? finalAssets.map((asset) => asset.id);
+      const nextOrder = mergeVisibleOrder(previousOrder, visibleOrderedIds);
+      if (nextOrder.join("|") === previousOrder.join("|")) return;
+
+      setFinalOrderIds(nextOrder);
+      void (async () => {
+        try {
+          const updated = await reorderFolderFinalMedia(folder._id, nextOrder);
+          setFolder(updated);
+          setFinalOrderIds(null);
+        } catch (e) {
+          setFinalOrderIds(previousOrder);
+          showToast(
+            e instanceof FoldersApiError
+              ? e.message
+              : e instanceof Error
+                ? e.message
+                : "Could not save final order.",
+            "error",
+          );
+        }
+      })();
+    },
+    [busy, folder, finalAssets, finalOrderIds, mediaDeleteBlocked, showToast],
+  );
 
   async function onDeleteRawAsset(mediaId: string) {
     if (!folder || mediaDeleteBlocked()) return;
@@ -1786,9 +2525,12 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
   }
 
   const clientName = getFolderClientName(folder);
+  const clientHasPhone = Boolean(getFolderClientContact(folder));
   const title = folder.eventName?.trim() || clientName;
   const coverUrl = getFolderCoverUrl(folder);
-  const coverSrc = coverUrl ?? FALLBACK_COVER;
+  const coverSrc = coverUrl
+    ? withGalleryImageCacheBust(coverUrl, coverCacheBust ?? folder.updatedAt)
+    : FALLBACK_COVER;
   const hasCover = Boolean(coverUrl);
   const studioName = getAuth()?.user?.studio?.companyName?.trim() || STUDIO_NAME;
   const eventDateLabel = new Date(folder.eventDate).toLocaleDateString(undefined, {
@@ -1904,6 +2646,9 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
           uploads: rawAssets.length,
           selection: clientSelectedAssets.length,
           finals: finalAssets.length,
+          // blog: folder
+          //   ? listGalleryBlogPosts(folder._id).filter((p) => p.status === "published").length
+          //   : 0,
         }}
         showPreviewToggle={tab === "gallery"}
         previewViewport={previewViewport}
@@ -1939,18 +2684,43 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
 
       <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-8">
         <div className="min-w-0 flex-1 space-y-5">
+          {tab === "dashboard" ? (
+            <GalleryDashboardPanel
+              published={galleryPublished}
+              shareExpired={folder.shareExpired}
+              sharedAt={folder.share?.sharedAt}
+              uploadsCount={rawAssets.length}
+              finalsCount={finalAssets.length}
+              commentsCount={selectionWithComments.length}
+              flaggedFinalsCount={flaggedFinalItems.length}
+              selectionLimit={folder ? folderSelectionLimit(folder) : null}
+              shareActive={shareActive}
+              shareUrl={shareUrl}
+              linkCopied={linkCopied}
+              passwordProtection={passwordProtectionDraft}
+              finalImagesLocked={finalImagesLocked}
+              analytics={galleryAnalytics}
+              statusBusy={busy}
+              activationHint={galleryOnlineHint}
+              clientHasPhone={clientHasPhone}
+              onNavigateTab={setTab}
+              onCopyShare={() => void onCopyShareLink()}
+              onOnlineChange={(next, options) => void onToggleGalleryOnline(next, options)}
+            />
+          ) : null}
+
           {tab === "gallery" ? (
             <GalleryClientPreview
               coverSrc={coverSrc}
               hasCover={hasCover}
               title={title}
-              eventDateLabel={eventDateLabel}
-              studioName={studioName}
               coverFrame={coverFrameDraft}
               coverColor={coverColorDraft}
+              coverTextColor={coverTextColorDraft}
+              coverButtonColor={coverButtonColorDraft}
               focalX={previewFocal.x}
               focalY={previewFocal.y}
-              previewLayout={previewLayout}
+              previewLayout={imageLayoutDraft}
               previewViewport={previewViewport}
               titleFont={titleFontDraft}
               bodyFont={bodyFontDraft}
@@ -1978,11 +2748,26 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
                 deleteKeyPrefix="raw"
               />
             ) : null}
+            <FolderUploadOptionToggle
+              checked={rawUploadPreviewWatermark}
+              onChange={(checked) => void onRawUploadWatermarkChange(checked)}
+              disabled={busy || savingUploadWatermark}
+              label="Add preview watermark"
+              hint="Watermarks client-facing previews for new raw uploads."
+              prerequisiteMet={studioWatermarkPreview !== false}
+              prerequisiteMessage="Turn on Watermark preview images in Gallery defaults first."
+              onPrerequisiteNeeded={goToPreviewWatermarkSettings}
+            />
             <UploadDragger
               compact={rawAssets.length > 0}
-              label={rawAssets.length > 0 ? "Add more files" : "Drop files here"}
-              hint="Photos or videos · JPG, PNG, WebP, GIF, RAW"
-              accept="image/jpeg,image/png,image/webp,image/gif,video/*"
+              label={rawAssets.length > 0 ? "Add more files" : "Drop files or a folder here"}
+              hint="Click to browse, or drop a folder — photos, videos, and camera RAW (CR2, NEF, ARW, DNG, HEIC, and more)"
+              accept={RAW_UPLOAD_ACCEPT}
+              allowDirectory
+              filterFile={isRawUploadableFile}
+              onFilteredEmpty={() =>
+                showToast("No supported files found. Try photos, videos, or camera RAW files.", "error")
+              }
               disabled={busy}
               onFiles={(files) => void onRawUpload(files)}
             />
@@ -2001,8 +2786,9 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
                 items={filteredRawAssets.map((a) => ({
                   id: a.id,
                   name: a.originalName,
-                  mediaSrc: a.previewUrl ?? a.thumbUrl,
+                  mediaSrc: demoAssetGridSrc(a),
                   isVideo: isFolderMediaVideo(a),
+                  derivativesPending: a.derivativesReady === false && !isFolderMediaVideo(a),
                 }))}
                 selectedIds={selectedRawIds}
                 onToggleSelected={toggleRawSelected}
@@ -2011,9 +2797,14 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
                   setLightboxZoom(1);
                 }}
                 onDelete={(id) => void onDeleteRawAsset(id)}
+                onSetCover={(id) => void onSetCoverFromMedia(id, "raw")}
                 deletingKey={deletingKey}
+                settingCoverKey={settingCoverKey}
                 mediaDeleteBlocked={mediaDeleteBlocked()}
                 deleteKeyPrefix="raw"
+                reorderable
+                reorderDisabled={busy}
+                onReorder={onReorderRawMedia}
               />
             )}
           </div>
@@ -2052,7 +2843,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
             ) : (
               <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
                 {filteredSelectionBySet.map((a) => {
-                  const mediaSrc = a.previewUrl ?? a.thumbUrl;
+                  const mediaSrc = demoAssetGridSrc(a);
                   const isVideo = isFolderMediaVideo(a);
                   const hasComment = Boolean((a.clientComment ?? "").trim());
                   const hasReply = Boolean((a.photographerReply ?? "").trim());
@@ -2183,11 +2974,26 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
                 deleteKeyPrefix="final"
               />
             ) : null}
+            <FolderUploadOptionToggle
+              checked={finalUploadWatermark}
+              onChange={(checked) => void onFinalUploadWatermarkChange(checked)}
+              disabled={busy || savingFinalWatermark}
+              label="Add watermark for final images"
+              hint="Applies your brand logo watermark to uploaded finals."
+              prerequisiteMet={studioBrandWatermarkEnabled !== false}
+              prerequisiteMessage="Turn on your brand watermark in Settings → Watermark first."
+              onPrerequisiteNeeded={goToBrandWatermarkSettings}
+            />
             <UploadDragger
               compact={finalAssets.length > 0}
-              label={finalAssets.length > 0 ? "Add more finals" : "Drop finals here"}
-              hint="Photos or videos · JPG, PNG, WebP, GIF"
+              label={finalAssets.length > 0 ? "Add more finals" : "Drop finals or a folder here"}
+              hint="Click to browse, or drop a folder — photos and videos"
               accept="image/jpeg,image/png,image/webp,image/gif,video/*"
+              allowDirectory
+              filterFile={isFinalUploadableFile}
+              onFilteredEmpty={() =>
+                showToast("No supported image or video files found in that folder.", "error")
+              }
               disabled={busy}
               onFiles={(files) => void openFinalUploadWizard(files)}
             />
@@ -2218,13 +3024,26 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
                   setLightboxZoom(1);
                 }}
                 onDelete={(id) => void onDeleteFinalAsset(id)}
+                onSetCover={(id) => void onSetCoverFromMedia(id, "final")}
                 deletingKey={deletingKey}
+                settingCoverKey={settingCoverKey}
                 mediaDeleteBlocked={mediaDeleteBlocked()}
                 deleteKeyPrefix="final"
+                reorderable
+                reorderDisabled={busy}
+                onReorder={onReorderFinalMedia}
               />
             )}
           </div>
         ) : null}
+
+        {/* {tab === "blog" ? (
+          <GalleryBlogEditorPanel
+            folderId={folder._id}
+            uploads={extractRawMediaList(folder)}
+            busy={busy}
+          />
+        ) : null} */}
         </div>
 
         {tab === "gallery" ? (
@@ -2233,15 +3052,25 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
             onCoverFrameChange={setCoverFrameDraft}
             coverColorDraft={coverColorDraft}
             onCoverColorChange={setCoverColorDraft}
+            coverTextColorDraft={coverTextColorDraft}
+            onCoverTextColorChange={setCoverTextColorDraft}
+            coverButtonColorDraft={coverButtonColorDraft}
+            onCoverButtonColorChange={setCoverButtonColorDraft}
             savingCoverFrame={savingCoverFrame}
-            previewLayout={previewLayout}
-            onPreviewLayoutChange={setPreviewLayout}
+            previewLayout={imageLayoutDraft}
+            onPreviewLayoutChange={setImageLayoutDraft}
+            savingImageLayout={savingImageLayout}
             titleFont={titleFontDraft}
             bodyFont={bodyFontDraft}
             onTitleFontChange={setTitleFontDraft}
             onBodyFontChange={setBodyFontDraft}
+            coverFrameOptions={coverFrameOptions}
+            gridLayoutOptions={gridLayoutOptions}
+            coverColorPresets={coverColorPresets}
+            titleFontOptions={titleFontOptions}
+            bodyFontOptions={bodyFontOptions}
             allowDownloads={allowDownloadsDraft}
-            onAllowDownloadsChange={setAllowDownloadsDraft}
+            onAllowDownloadsChange={onAllowDownloadsChange}
             musicEnabled={folder.backgroundMusicEnabled !== false}
             onMusicEnabledChange={(v) => void onToggleBackgroundMusicForClients(v)}
             musicBusy={musicBusy}
@@ -2252,6 +3081,7 @@ export function FolderDetailView({ folderId }: { folderId: string }) {
             accessPinCopied={accessPinCopied}
             onCopyAccessPin={() => void onCopyAccessPin()}
             onRegenerateAccessPin={onRegenerateAccessPin}
+            accessPinBusy={accessPinBusy}
             coverBusy={coverBusy}
             hasCover={hasCover}
             onReplaceCover={() => coverFileInputRef.current?.click()}

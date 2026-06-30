@@ -1,5 +1,6 @@
 import { apiUrl } from "@/lib/api";
 import { clearAuth, getAuthToken } from "@/lib/auth-demo";
+import { photographerAuthUrl, photographerSignOutUrl } from "@/lib/studio-url";
 
 /**
  * Base class for failures returned by an authenticated API call.
@@ -20,6 +21,9 @@ export class HttpError extends Error {
     this.body = body;
   }
 }
+
+/** Thrown when a protected API responds with 403 EMAIL_NOT_VERIFIED. */
+export class EmailNotVerifiedError extends HttpError {}
 
 /** Safe JSON parse — returns null on non-JSON / empty bodies. */
 export async function parseJson(res: Response): Promise<unknown> {
@@ -46,12 +50,36 @@ export function extractMessage(body: unknown, fallback: string): string {
   return fallback;
 }
 
+/** True when a 403 body indicates the account email is not verified yet. */
+function isEmailNotVerified403(body: unknown): boolean {
+  return (
+    body !== null &&
+    typeof body === "object" &&
+    (body as { code?: string }).code === "EMAIL_NOT_VERIFIED"
+  );
+}
+
+function throwIfEmailNotVerified(status: number, body: unknown): void {
+  if (status !== 403 || !isEmailNotVerified403(body)) return;
+  if (
+    typeof window !== "undefined" &&
+    !window.location.pathname.startsWith("/verify-email")
+  ) {
+    window.location.href = photographerAuthUrl("/verify-email");
+  }
+  throw new EmailNotVerifiedError(
+    extractMessage(body, "Email verification required"),
+    403,
+    body,
+  );
+}
+
 /** True when a 401 body indicates JWT/session failure (not upstream provider errors). */
 function isAuthSession401(body: unknown): boolean {
   const msg = extractMessage(body, "").toLowerCase();
   if (!msg) return true;
   if (/openai|api key rejected|provider/i.test(msg)) return false;
-  return /not authorized|token|session expired|log in again|account no longer/i.test(msg);
+  return /not authorized|token|session expired|session ended|log in again|account no longer/i.test(msg);
 }
 
 export type AuthedFetchOptions = {
@@ -100,10 +128,15 @@ export async function authedFetch(
         typeof window !== "undefined" &&
         !window.location.pathname.startsWith("/login")
       ) {
-        window.location.href = "/login";
+        window.location.href = photographerSignOutUrl();
       }
     }
     throw new HttpError(message, 401, errBody);
+  }
+
+  if (res.status === 403) {
+    const errBody = await parseJson(res.clone());
+    throwIfEmailNotVerified(403, errBody);
   }
 
   return res;
@@ -127,6 +160,7 @@ export async function authedJson<T>(
   const res = await authedFetch(path, init, options);
   const body = await parseJson(res);
   if (!res.ok) {
+    throwIfEmailNotVerified(res.status, body);
     throw new ErrorCtor(
       extractMessage(body, `${fallbackError} (${res.status})`),
       res.status,
@@ -171,7 +205,7 @@ function handleAuth401(
       typeof window !== "undefined" &&
       !window.location.pathname.startsWith("/login")
     ) {
-      window.location.href = "/login";
+      window.location.href = photographerSignOutUrl();
     }
   }
   throw new HttpError(message, 401, body);
@@ -222,6 +256,12 @@ export async function authedFormUpload<T>(
         } catch (e) {
           reject(e);
         }
+        return;
+      }
+      try {
+        throwIfEmailNotVerified(xhr.status, body);
+      } catch (e) {
+        reject(e);
         return;
       }
       if (xhr.status < 200 || xhr.status >= 300) {

@@ -1,16 +1,30 @@
 import { API_BASE_URL, apiUrl, sameOriginUploadsUrl } from "@/lib/api";
 import { getBackendApiUrl } from "@/lib/backend-proxy";
+import { extractMessage, HttpError, parseJson } from "@/lib/http";
+import { clearGalleryAccessToken, readGalleryAccessToken, writeGalleryAccessToken } from "@/lib/gallery-access-client-config";
 import { parseFolderCoverFocal } from "@/lib/folders/helpers";
 import { applyBrandWatermarkToImageBlob } from "@/lib/apply-brand-watermark";
 import { getBrandWatermarkSettings } from "@/lib/watermark-brand";
-import { normalizeGalleryCoverColor } from "@/lib/gallery-cover-color";
+import { normalizeGalleryCoverColor, resolveGalleryCoverButtonColor, resolveGalleryCoverTextColor } from "@/lib/gallery-cover-color";
 import { normalizeGalleryCoverFrame, type GalleryCoverFrame } from "@/lib/gallery-cover-frame";
-import { extractMessage, HttpError, parseJson } from "@/lib/http";
+import {
+  normalizeGalleryImageLayout,
+  type GalleryImageLayout,
+} from "@/lib/gallery-image-layout";
+import {
+  apiBackdropColorToHex,
+  apiCoverStyleToFrame,
+  apiGridStyleToLayout,
+} from "@/lib/galleries-api";
 
 export type ShareGalleryAsset = {
   id: string;
   originalName: string;
   thumbUrl: string;
+  /** Full-quality file URL — fallback while thumbnails / watermarks process. */
+  url?: string;
+  /** Watermarked client preview URL when distinct from {@link thumbUrl}. */
+  displayUrl?: string;
   /** Larger / display-quality URL for full-screen preview when distinct from {@link thumbUrl}. */
   previewUrl?: string;
   selection: "SELECTED" | "UNSELECTED";
@@ -57,6 +71,9 @@ export type PublicGalleryPhoto = {
   galleryId?: string;
   originalFilename: string;
   url: string;
+  thumbUrl?: string;
+  displayUrl?: string;
+  derivativesReady?: boolean;
   mimeType?: string;
   sizeBytes?: number;
   isVideo?: boolean;
@@ -101,11 +118,11 @@ export type PublicGalleryResponse = {
     selectionLocked?: boolean;
     canEditSelections?: boolean;
     finalDelivery?: boolean;
+    /** Live cover URL — source of truth for the client hero after share-link activation. */
     coverImageUrl?: string | null;
-    displayCoverUrl?: string | null;
     useDefaultCover?: boolean;
     usingDefaultCover?: boolean;
-    /** Frozen at share-link activation; public hero prefers these over live admin cover. */
+    /** Frozen at share-link activation; fallback when {@link coverImageUrl} is absent. */
     shareCoverImageUrl?: string | null;
     shareUseDefaultCover?: boolean;
     shareCoverFocalX?: number;
@@ -118,6 +135,8 @@ export type PublicGalleryResponse = {
     coverFrame?: string | null;
     coverColor?: string | null;
     shareCoverColor?: string | null;
+    imageLayout?: string | null;
+    shareImageLayout?: string | null;
     backgroundMusicUrl?: string | null;
     clientName?: string | null;
     sharePasswordEnabled?: boolean;
@@ -126,6 +145,10 @@ export type PublicGalleryResponse = {
     share_access_pin?: string;
     accessPin?: string;
     access_pin?: string;
+    watermarkPreviewEnabled?: boolean;
+    watermark_preview_enabled?: boolean;
+    allowDownloads?: boolean;
+    allow_downloads?: boolean;
   };
   studio?: {
     companyName?: string;
@@ -165,6 +188,12 @@ export type NormalizedShareGallery = {
   coverFrame: GalleryCoverFrame;
   /** Backdrop color for cover styles that use a solid hero surface. */
   coverColor: string;
+  /** Hero title text color (hex). Auto from backdrop when omitted in API. */
+  coverTextColor: string;
+  /** Hero “View gallery” button accent (hex). Auto from backdrop when omitted in API. */
+  coverButtonColor: string;
+  /** Photographer default for the photo grid on this share link. */
+  imageLayout: GalleryImageLayout;
   /** At least one successful submit; backend refreshes `share.selectionSubmittedAt` each time. Does not block editing. */
   selectionSubmitted: boolean;
   /** Editable unless photographer-locked; mirrors GET `canEditSelections` (`!share.selectionLocked`). */
@@ -185,6 +214,14 @@ export type NormalizedShareGallery = {
   backgroundMusicUrl?: string;
   /** When false, clients should not play music. Defaults to true when omitted. */
   backgroundMusicEnabled?: boolean;
+  /** Client gallery title typography from design-settings. */
+  titleFont?: string;
+  /** Client gallery body typography from design-settings. */
+  bodyFont?: string;
+  /** When false, hide or disable client download actions. */
+  allowDownloads?: boolean;
+  /** When true, client-facing originals/previews should show the studio preview watermark. */
+  watermarkPreviewEnabled?: boolean;
   assets: ShareGalleryAsset[];
   finals: ShareGalleryFinal[];
   counts?: { uploads: number; selected: number; rejected?: number; finals: number; flaggedFinals?: number };
@@ -193,6 +230,40 @@ export type NormalizedShareGallery = {
 type Raw = Record<string, unknown>;
 
 export class ShareGalleryError extends HttpError {}
+
+/** GET returned 401 — gallery exists but requires a client access code. */
+export class ShareGalleryPasswordRequiredError extends ShareGalleryError {
+  constructor(message: string, body: unknown) {
+    super(message, 401, body);
+    this.name = "ShareGalleryPasswordRequiredError";
+  }
+}
+
+export const GALLERY_ACCESS_TOKEN_HEADER = "X-Gallery-Access-Token";
+
+export function isShareGalleryPasswordRequiredBody(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const o = body as Raw;
+  return o.accessRequired === true || o.passwordRequired === true;
+}
+
+export function isShareGalleryPasswordRequiredError(err: unknown): boolean {
+  if (err instanceof ShareGalleryPasswordRequiredError) return true;
+  return (
+    err instanceof ShareGalleryError &&
+    err.status === 401 &&
+    isShareGalleryPasswordRequiredBody(err.body)
+  );
+}
+
+/** Read `allowDownloads` from a public gallery or download API payload. */
+export function readAllowDownloadsFromApiBody(body: unknown): boolean | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const o = body as Raw;
+  if (typeof o.allowDownloads === "boolean") return o.allowDownloads;
+  if (typeof o.allow_downloads === "boolean") return o.allow_downloads;
+  return undefined;
+}
 
 /** Resolve studio logo URLs (upload path, absolute URL, or data URL). */
 function resolveStudioLogoUrl(url?: string | null): string {
@@ -278,6 +349,16 @@ function shareTruthyOn(v: unknown): boolean {
   return true;
 }
 
+/** First defined share flag wins; missing values default to off (not protected). */
+function readShareFlag(...candidates: unknown[]): boolean {
+  for (const v of candidates) {
+    if (v !== undefined && v !== null) {
+      return shareTruthyOn(v);
+    }
+  }
+  return false;
+}
+
 /** Whether the gallery hero should use the studio default cover (matches dashboard `useDefaultCover`). */
 function shareUsesDefaultCover(folder: Raw | null, root: Raw): boolean {
   const v =
@@ -358,103 +439,146 @@ function shareSnapshotFocalSource(folder: Raw | null, root: Raw): Record<string,
   };
 }
 
+function readGalleryDesign(...sources: (Raw | null | undefined)[]): Raw | null {
+  for (const source of sources) {
+    if (!source) continue;
+    const design = source.design;
+    if (design && typeof design === "object") return design as Raw;
+  }
+  return null;
+}
+
+function readGalleryTypography(design: Raw | null): Raw | null {
+  if (!design) return null;
+  const typography = design.typography;
+  return typography && typeof typography === "object" ? (typography as Raw) : null;
+}
+
 function resolvePublicGalleryCoverFrame(folder: Raw | null, root: Raw): GalleryCoverFrame {
+  const design = readGalleryDesign(folder, root);
+  const live =
+    folder?.coverStyle ??
+    (folder as Raw | null)?.cover_style ??
+    root.coverStyle ??
+    (root as Raw).cover_style ??
+    design?.coverStyle ??
+    (design as Raw | null)?.cover_style ??
+    folder?.coverFrame ??
+    (folder as Raw | null)?.cover_frame ??
+    root.coverFrame ??
+    (root as Raw).cover_frame;
+  if (live != null) return apiCoverStyleToFrame(live);
   const snapshotFrame =
     folder?.shareCoverFrame ??
     (folder as Raw | null)?.share_cover_frame ??
     root.shareCoverFrame ??
     (root as Raw).share_cover_frame;
-  if (snapshotFrame != null) return normalizeGalleryCoverFrame(snapshotFrame);
-  return normalizeGalleryCoverFrame(
-    folder?.coverFrame ??
-      (folder as Raw | null)?.cover_frame ??
-      root.coverFrame ??
-      (root as Raw).cover_frame,
-  );
+  if (snapshotFrame != null) return apiCoverStyleToFrame(snapshotFrame);
+  return "full-bleed";
 }
 
 function resolvePublicGalleryCoverColor(folder: Raw | null, root: Raw): string {
+  const design = readGalleryDesign(folder, root);
+  const live =
+    folder?.generalColor ??
+    (folder as Raw | null)?.general_color ??
+    folder?.backdropColor ??
+    (folder as Raw | null)?.backdrop_color ??
+    root.generalColor ??
+    (root as Raw).general_color ??
+    root.backdropColor ??
+    (root as Raw).backdrop_color ??
+    design?.generalColor ??
+    (design as Raw | null)?.general_color ??
+    design?.backdropColor ??
+    (design as Raw | null)?.backdrop_color ??
+    folder?.coverColor ??
+    (folder as Raw | null)?.cover_color ??
+    root.coverColor ??
+    (root as Raw).cover_color;
+  if (live != null) return apiBackdropColorToHex(live);
   const snapshotColor =
     folder?.shareCoverColor ??
     (folder as Raw | null)?.share_cover_color ??
     root.shareCoverColor ??
     (root as Raw).share_cover_color;
-  if (snapshotColor != null) return normalizeGalleryCoverColor(snapshotColor);
-  return normalizeGalleryCoverColor(
-    folder?.coverColor ??
-      (folder as Raw | null)?.cover_color ??
-      root.coverColor ??
-      (root as Raw).cover_color,
-  );
+  if (snapshotColor != null) return apiBackdropColorToHex(snapshotColor);
+  return normalizeGalleryCoverColor(undefined);
 }
 
-/** Resolve hero cover + focal for public client gallery (snapshot when present, else live admin cover). */
-function resolvePublicGalleryCover(
+function resolvePublicGalleryCoverAccentColor(
+  folder: Raw | null,
+  root: Raw,
+  field: "coverTextColor" | "coverButtonColor",
+): string | undefined {
+  const design = readGalleryDesign(folder, root);
+  const snake = field === "coverTextColor" ? "cover_text_color" : "cover_button_color";
+  const snapshotField =
+    field === "coverTextColor" ? "shareCoverTextColor" : "shareCoverButtonColor";
+  const snapshotSnake =
+    field === "coverTextColor" ? "share_cover_text_color" : "share_cover_button_color";
+  const live =
+    folder?.[field] ??
+    (folder as Raw | null)?.[snake] ??
+    root[field] ??
+    (root as Raw)[snake] ??
+    design?.[field] ??
+    (design as Raw | null)?.[snake];
+  if (live != null && str(live)) {
+    return normalizeGalleryCoverColor(apiBackdropColorToHex(live));
+  }
+  const snapshot =
+    folder?.[snapshotField] ??
+    (folder as Raw | null)?.[snapshotSnake] ??
+    root[snapshotField] ??
+    (root as Raw)[snapshotSnake];
+  if (snapshot != null && str(snapshot)) {
+    return normalizeGalleryCoverColor(apiBackdropColorToHex(snapshot));
+  }
+  return undefined;
+}
+
+function resolvePublicGalleryImageLayout(folder: Raw | null, root: Raw): GalleryImageLayout {
+  const design = readGalleryDesign(folder, root);
+  const live =
+    folder?.gridStyle ??
+    (folder as Raw | null)?.grid_style ??
+    root.gridStyle ??
+    (root as Raw).grid_style ??
+    design?.gridStyle ??
+    (design as Raw | null)?.grid_style ??
+    folder?.imageLayout ??
+    (folder as Raw | null)?.image_layout ??
+    root.imageLayout ??
+    (root as Raw).image_layout;
+  if (live != null) return apiGridStyleToLayout(String(live));
+  const snapshot =
+    folder?.shareImageLayout ??
+    (folder as Raw | null)?.share_image_layout ??
+    root.shareImageLayout ??
+    (root as Raw).share_image_layout;
+  if (snapshot != null) return normalizeGalleryImageLayout(String(snapshot));
+  return "masonry";
+}
+
+/**
+ * Live cover from the public gallery payload (`gallery.coverImageUrl`).
+ * After share-link activation, PUT /api/galleries/:id keeps this in sync with the dashboard cover.
+ * Does not read `displayCoverUrl` — that field is admin-only.
+ */
+function resolveLiveAdminGalleryCoverRaw(
   folder: Raw | null,
   root: Raw,
   nested: Raw | null,
-): { coverImageUrl?: string; coverFocalX: number; coverFocalY: number } {
-  if (hasShareCoverSnapshot(folder, root)) {
-    let coverRaw = "";
-    if (shareSnapshotUsesDefaultCover(folder, root)) {
-      forEachSettingsBlob(root, folder, nested, (o) => {
-        if (coverRaw) return;
-        coverRaw = firstNonEmptyCoverRef(
-          o.defaultCoverImageUrl,
-          o.defaultCoverImage,
-          o.default_cover_image_url,
-          o.default_cover_image,
-        );
-      });
-      if (!coverRaw && folder) {
-        const o = folder as Raw;
-        coverRaw = firstNonEmptyCoverRef(
-          o.defaultCoverImageUrl,
-          o.defaultCoverImage,
-          o.default_cover_image_url,
-          o.default_cover_image,
-        );
-      }
-    } else {
-      coverRaw = firstNonEmptyCoverRef(
-        folder?.shareCoverImageUrl,
-        (folder as Raw)?.share_cover_image_url,
-        root.shareCoverImageUrl,
-        (root as Raw).share_cover_image_url,
-      );
-    }
-
-    const focal = parseFolderCoverFocal(shareSnapshotFocalSource(folder, root));
-    const coverVersion = coverCacheVersion(folder, root, nested);
-    const coverImageUrl = coverRaw
-      ? withGalleryImageCacheBust(resolvePublicGalleryImageUrl(coverRaw), coverVersion)
-      : undefined;
-    return { coverImageUrl, coverFocalX: focal.x, coverFocalY: focal.y };
-  }
-
+): string {
   const usesDefaultCover = shareUsesDefaultCover(folder, root);
 
-  const displayCoverRefs = [
-    folder?.displayCoverUrl,
-    (folder as Raw)?.display_cover_url,
-    root.displayCoverUrl,
-    (root as Raw).display_cover_url,
-    (folder as Raw)?.effectiveCoverUrl,
-    (folder as Raw)?.effective_cover_url,
-    (folder as Raw)?.resolvedCoverUrl,
-    (folder as Raw)?.resolved_cover_url,
-    nested && typeof nested === "object" ? (nested as Raw).displayCoverUrl : null,
-    nested && typeof nested === "object" ? (nested as Raw).display_cover_url : null,
-  ];
-
-  const customCoverRefs = [
+  const coverImageRefs = [
     folder?.coverImageUrl,
     folder?.coverImage,
     (folder as Raw)?.cover_image_url,
     (folder as Raw)?.cover_image,
     (folder as Raw)?.cover,
-    (folder as Raw)?.heroImageUrl,
-    (folder as Raw)?.hero_image_url,
     nested && typeof nested === "object" ? (nested as Raw).coverImageUrl : null,
     nested && typeof nested === "object" ? (nested as Raw).coverImage : null,
     nested && typeof nested === "object" ? (nested as Raw).cover : null,
@@ -465,11 +589,7 @@ function resolvePublicGalleryCover(
     (root as Raw).cover,
   ];
 
-  let coverRaw = firstNonEmptyCoverRef(...displayCoverRefs);
-
-  if (!coverRaw && !usesDefaultCover) {
-    coverRaw = firstNonEmptyCoverRef(...customCoverRefs);
-  }
+  let coverRaw = firstNonEmptyCoverRef(...coverImageRefs);
 
   if (!coverRaw && usesDefaultCover) {
     forEachSettingsBlob(root, folder, nested, (o) => {
@@ -492,21 +612,93 @@ function resolvePublicGalleryCover(
     }
   }
 
-  if (!coverRaw) {
-    coverRaw = firstNonEmptyCoverRef(...customCoverRefs);
+  return coverRaw;
+}
+
+/** Frozen hero at share-link activation — used only when no live admin cover is available. */
+function resolveShareSnapshotGalleryCoverRaw(
+  folder: Raw | null,
+  root: Raw,
+  nested: Raw | null,
+): string {
+  if (!hasShareCoverSnapshot(folder, root)) return "";
+
+  if (shareSnapshotUsesDefaultCover(folder, root)) {
+    let coverRaw = "";
+    forEachSettingsBlob(root, folder, nested, (o) => {
+      if (coverRaw) return;
+      coverRaw = firstNonEmptyCoverRef(
+        o.defaultCoverImageUrl,
+        o.defaultCoverImage,
+        o.default_cover_image_url,
+        o.default_cover_image,
+      );
+    });
+    if (!coverRaw && folder) {
+      const o = folder as Raw;
+      coverRaw = firstNonEmptyCoverRef(
+        o.defaultCoverImageUrl,
+        o.defaultCoverImage,
+        o.default_cover_image_url,
+        o.default_cover_image,
+      );
+    }
+    return coverRaw;
   }
 
-  const focalPayload =
-    folder && typeof folder === "object"
-      ? ({ ...root, ...folder } as Record<string, unknown>)
-      : (root as Record<string, unknown>);
-  const focal = parseFolderCoverFocal(focalPayload);
-  const coverVersion = coverCacheVersion(folder, root, nested);
-  const coverImageUrl = coverRaw
-    ? withGalleryImageCacheBust(resolvePublicGalleryImageUrl(coverRaw), coverVersion)
-    : undefined;
+  return (
+    firstNonEmptyCoverRef(
+      folder?.shareCoverImageUrl,
+      (folder as Raw)?.share_cover_image_url,
+      root.shareCoverImageUrl,
+      (root as Raw).share_cover_image_url,
+    ) ?? ""
+  );
+}
 
-  return { coverImageUrl, coverFocalX: focal.x, coverFocalY: focal.y };
+/**
+ * Resolve hero cover + focal for the client share gallery.
+ * Prefers live `gallery.coverImageUrl` (synced after share-link activation + PUT cover updates);
+ * falls back to the activation snapshot when the live URL is absent.
+ */
+function resolvePublicGalleryCover(
+  folder: Raw | null,
+  root: Raw,
+  nested: Raw | null,
+): { coverImageUrl?: string; coverFocalX: number; coverFocalY: number } {
+  const coverVersion = coverCacheVersion(folder, root, nested);
+  const liveCoverRaw = resolveLiveAdminGalleryCoverRaw(folder, root, nested);
+
+  if (liveCoverRaw) {
+    const focalPayload =
+      folder && typeof folder === "object"
+        ? ({ ...root, ...folder } as Record<string, unknown>)
+        : (root as Record<string, unknown>);
+    const focal = parseFolderCoverFocal(focalPayload);
+    return {
+      coverImageUrl: withGalleryImageCacheBust(
+        resolvePublicGalleryImageUrl(liveCoverRaw),
+        coverVersion,
+      ),
+      coverFocalX: focal.x,
+      coverFocalY: focal.y,
+    };
+  }
+
+  const snapshotCoverRaw = resolveShareSnapshotGalleryCoverRaw(folder, root, nested);
+  if (snapshotCoverRaw) {
+    const focal = parseFolderCoverFocal(shareSnapshotFocalSource(folder, root));
+    return {
+      coverImageUrl: withGalleryImageCacheBust(
+        resolvePublicGalleryImageUrl(snapshotCoverRaw),
+        coverVersion,
+      ),
+      coverFocalX: focal.x,
+      coverFocalY: focal.y,
+    };
+  }
+
+  return { coverImageUrl: undefined, coverFocalX: 50, coverFocalY: 50 };
 }
 
 /** Resolve image URLs the same way as folder covers (relative → same-origin or API base). */
@@ -557,11 +749,15 @@ function assetFromRow(item: unknown, idx: number): ShareGalleryAsset | null {
     str(o.image) ||
     str(o.src) ||
     "";
-  const thumbRaw = smallThumb || largePreview;
-  const thumbUrl = resolvePublicGalleryImageUrl(thumbRaw);
-  if (!thumbUrl) return null;
+  const thumbRaw = smallThumb || "";
+  const thumbUrl = thumbRaw ? resolvePublicGalleryImageUrl(thumbRaw) : "";
+  const urlResolved = largePreview ? resolvePublicGalleryImageUrl(largePreview) : "";
+  if (!thumbUrl && !urlResolved) return null;
 
-  const largeResolved = largePreview ? resolvePublicGalleryImageUrl(largePreview) : "";
+  const displayUrlRaw = str(o.displayUrl) || str(o.previewUrl) || "";
+  const displayUrlResolved = displayUrlRaw
+    ? resolvePublicGalleryImageUrl(displayUrlRaw)
+    : "";
   const mimeType =
     str(o.mimeType) ||
     str(o.mime_type) ||
@@ -574,13 +770,15 @@ function assetFromRow(item: unknown, idx: number): ShareGalleryAsset | null {
     mimeType.toLowerCase().startsWith("video/") ||
     /\.(mp4|mov|webm|m4v|avi|mkv|ogv)$/i.test(originalName);
 
-  const mediaUrl = largeResolved || thumbUrl;
+  const mediaUrl = urlResolved || thumbUrl;
   const previewUrl =
     isVideo
       ? mediaUrl
-      : largeResolved && largeResolved !== thumbUrl
-        ? largeResolved
-        : undefined;
+      : displayUrlResolved && thumbUrl && displayUrlResolved !== thumbUrl
+        ? displayUrlResolved
+        : displayUrlResolved && !thumbUrl
+          ? displayUrlResolved
+          : undefined;
 
   const sel = str(o.selection).toUpperCase();
   const selected =
@@ -607,7 +805,9 @@ function assetFromRow(item: unknown, idx: number): ShareGalleryAsset | null {
   return {
     id,
     originalName,
-    thumbUrl: isVideo ? mediaUrl : thumbUrl,
+    thumbUrl: isVideo ? mediaUrl : thumbUrl || urlResolved,
+    ...(urlResolved ? { url: urlResolved } : {}),
+    ...(displayUrlResolved ? { displayUrl: displayUrlResolved } : {}),
     ...(previewUrl ? { previewUrl } : {}),
     selection: selected ? "SELECTED" : "UNSELECTED",
     ...(isVideo ? { isVideo: true } : {}),
@@ -751,6 +951,15 @@ export function normalizeShareGalleryBody(body: unknown): NormalizedShareGallery
       }
     }
   }
+  if (Array.isArray(root.selections)) {
+    for (const item of root.selections) {
+      if (item && typeof item === "object") {
+        const o = item as Raw;
+        const id = str(o.id) || str(o._id);
+        if (id) selectedIds.add(id);
+      }
+    }
+  }
 
   const assetsRaw: unknown[] =
     folder && Array.isArray(folder.uploads)
@@ -875,6 +1084,15 @@ export function normalizeShareGalleryBody(body: unknown): NormalizedShareGallery
   const { coverImageUrl, coverFocalX, coverFocalY } = resolvePublicGalleryCover(folder, root, nested);
   const coverFrame = resolvePublicGalleryCoverFrame(folder, root);
   const coverColor = resolvePublicGalleryCoverColor(folder, root);
+  const coverTextColor = resolveGalleryCoverTextColor(
+    coverColor,
+    resolvePublicGalleryCoverAccentColor(folder, root, "coverTextColor"),
+  );
+  const coverButtonColor = resolveGalleryCoverButtonColor(
+    coverColor,
+    resolvePublicGalleryCoverAccentColor(folder, root, "coverButtonColor"),
+  );
+  const imageLayout = resolvePublicGalleryImageLayout(folder, root);
 
   const folderPayload = folder ?? (root as Raw);
 
@@ -921,13 +1139,64 @@ export function normalizeShareGalleryBody(body: unknown): NormalizedShareGallery
   const backgroundMusicUrl =
     backgroundMusicEnabled && bgUrlRaw ? resolvePublicGalleryImageUrl(bgUrlRaw) : undefined;
 
-  const sharePasswordEnabled =
-    shareTruthyOn(folderPayload.sharePasswordEnabled) ||
-    shareTruthyOn(folderPayload.share_password_enabled) ||
-    shareTruthyOn(folder?.sharePasswordEnabled) ||
-    shareTruthyOn((folder as Raw | null)?.share_password_enabled) ||
-    shareTruthyOn(root.sharePasswordEnabled) ||
-    shareTruthyOn((root as Raw).share_password_enabled);
+  const sharePasswordEnabled = readShareFlag(
+    folderPayload.passwordProtected,
+    folderPayload.password_protected,
+    folderPayload.sharePasswordEnabled,
+    folderPayload.share_password_enabled,
+    folder?.sharePasswordEnabled,
+    (folder as Raw | null)?.share_password_enabled,
+    root.sharePasswordEnabled,
+    (root as Raw).share_password_enabled,
+  );
+
+  const design = readGalleryDesign(folder, root, folderPayload);
+  const typography = readGalleryTypography(design);
+
+  const titleFont =
+    str(folderPayload.titleFont) ||
+    str((folderPayload as Raw).title_font) ||
+    str(folder?.titleFont) ||
+    str((folder as Raw | null)?.title_font) ||
+    str(root.titleFont) ||
+    str((root as Raw).title_font) ||
+    str(typography?.titleFont) ||
+    str(typography?.title_font) ||
+    str(design?.titleFont) ||
+    str(design?.title_font) ||
+    undefined;
+
+  const bodyFont =
+    str(folderPayload.bodyFont) ||
+    str((folderPayload as Raw).body_font) ||
+    str(folder?.bodyFont) ||
+    str((folder as Raw | null)?.body_font) ||
+    str(root.bodyFont) ||
+    str((root as Raw).body_font) ||
+    str(typography?.bodyFont) ||
+    str(typography?.body_font) ||
+    str(design?.bodyFont) ||
+    str(design?.body_font) ||
+    undefined;
+
+  const allowDownloads =
+    typeof folderPayload.allowDownloads === "boolean"
+      ? folderPayload.allowDownloads
+      : typeof (folderPayload as Raw).allow_downloads === "boolean"
+        ? ((folderPayload as Raw).allow_downloads as boolean)
+        : typeof folder?.allowDownloads === "boolean"
+          ? folder.allowDownloads
+          : typeof (folder as Raw | null)?.allow_downloads === "boolean"
+            ? ((folder as Raw | null)?.allow_downloads as boolean)
+            : typeof share?.allowDownloads === "boolean"
+              ? (share.allowDownloads as boolean)
+              : typeof (share as Raw | null)?.allow_downloads === "boolean"
+                ? ((share as Raw | null)?.allow_downloads as boolean)
+                : typeof root.allowDownloads === "boolean"
+                  ? root.allowDownloads
+                  : typeof (root as Raw).allow_downloads === "boolean"
+                    ? ((root as Raw).allow_downloads as boolean)
+                    : undefined;
 
   const shareAccessPinRaw =
     str(folderPayload.shareAccessPin) ||
@@ -942,6 +1211,19 @@ export function normalizeShareGalleryBody(body: unknown): NormalizedShareGallery
     shareAccessPinDigits.length > 0
       ? shareAccessPinDigits.padStart(4, "0").slice(-4)
       : "";
+
+  const watermarkPreviewEnabled = readShareFlag(
+    folderPayload.watermarkPreviewEnabled,
+    folderPayload.watermark_preview_enabled,
+    folder?.watermarkPreviewEnabled,
+    (folder as Raw | null)?.watermark_preview_enabled,
+    root.watermarkPreviewEnabled,
+    (root as Raw).watermark_preview_enabled,
+    folderPayload.watermarkPreviewImages,
+    folderPayload.watermark_preview_images,
+    root.watermarkPreviewImages,
+    (root as Raw).watermark_preview_images,
+  );
 
   const studioRaw =
     root.studio && typeof root.studio === "object" ? (root.studio as Raw) : null;
@@ -970,16 +1252,23 @@ export function normalizeShareGalleryBody(body: unknown): NormalizedShareGallery
     coverFocalY,
     coverFrame,
     coverColor,
+    coverTextColor,
+    coverButtonColor,
+    imageLayout,
     selectionSubmitted,
     canEditSelections,
     selectionLocked,
     selectionLimit,
     finalDelivery,
     rightsProtection,
-    ...(sharePasswordEnabled ? { sharePasswordEnabled: true } : {}),
+    sharePasswordEnabled,
     ...(sharePasswordEnabled && shareAccessPin ? { shareAccessPin } : {}),
     backgroundMusicUrl,
     backgroundMusicEnabled,
+    ...(titleFont ? { titleFont } : {}),
+    ...(bodyFont ? { bodyFont } : {}),
+    ...(allowDownloads !== undefined ? { allowDownloads } : {}),
+    watermarkPreviewEnabled,
     assets,
     finals,
     counts,
@@ -1004,22 +1293,38 @@ function parseSelectionLimitFromBody(
   return Math.floor(n);
 }
 
-function publicFetchUrl(path: string, options?: { baseOrigin?: string }): string {
+function publicFetchUrl(path: string, _options?: { baseOrigin?: string }): string {
   const suffix = path.startsWith("/") ? path : `/${path}`;
   if (typeof window !== "undefined") {
     return apiUrl(suffix);
   }
-  const origin = options?.baseOrigin?.replace(/\/$/, "");
-  if (origin) {
-    return `${origin}${suffix}`;
-  }
+  // Server-side: call the backend directly (same target as the /api rewrite).
+  // Avoids self-fetching the Next app with a mismatched http/https origin.
   return `${getBackendApiUrl()}${suffix}`;
 }
 
 type PublicFetchOptions = {
   baseOrigin?: string;
   signal?: AbortSignal;
+  /** Attach `X-Gallery-Access-Token` from session storage when set. */
+  sessionId?: string;
 };
+
+function appendGalleryAccessToken(headers: Headers, sessionId?: string): void {
+  if (!sessionId || typeof window === "undefined") return;
+  const token = readGalleryAccessToken(sessionId);
+  if (token) headers.set(GALLERY_ACCESS_TOKEN_HEADER, token);
+}
+
+function publicGallerySessionOptions(
+  key: PublicGalleryKey | string,
+  options: PublicFetchOptions = {},
+): PublicFetchOptions {
+  return {
+    ...options,
+    sessionId: options.sessionId ?? publicGallerySessionId(key),
+  };
+}
 
 /** How to address a public client gallery on `/api/public/...`. */
 export type PublicGalleryKey =
@@ -1075,10 +1380,12 @@ async function publicFetch(
   ) {
     headers.set("Content-Type", "application/json");
   }
+  appendGalleryAccessToken(headers, options.sessionId);
   return fetch(publicFetchUrl(path, options), {
     ...init,
     headers,
     signal: options.signal,
+    credentials: "include",
   });
 }
 
@@ -1103,36 +1410,97 @@ async function publicJson<T>(
 async function togglePublicPhotoSelection(
   key: PublicGalleryKey | string,
   photoId: string,
-  options: PublicFetchOptions = {},
+  options: PublicFetchOptions & { comment?: string } = {},
 ): Promise<void> {
   const resolved = resolvePublicGalleryKey(key);
+  const fetchOptions = publicGallerySessionOptions(resolved, options);
+  const { comment, ...rest } = fetchOptions;
   await publicJson(
     publicGalleryApiPath(resolved, "/select"),
     {
       method: "POST",
-      body: JSON.stringify({ photoId }),
-      signal: options.signal,
+      body: JSON.stringify({
+        photoId,
+        ...(comment !== undefined ? { comment } : {}),
+      }),
+      signal: rest.signal,
     },
     "Could not update selection",
-    options,
+    rest,
   );
+}
+
+/** Unlock a password-protected public gallery (`POST .../unlock`). Returns the full gallery payload. */
+export async function postShareGalleryUnlock(
+  key: PublicGalleryKey | string,
+  password: string,
+  signal?: AbortSignal,
+): Promise<NormalizedShareGallery> {
+  const resolved = resolvePublicGalleryKey(key);
+  const sessionId = publicGallerySessionId(resolved);
+  const res = await publicFetch(
+    publicGalleryApiPath(resolved, "/unlock"),
+    {
+      method: "POST",
+      body: JSON.stringify({ password }),
+      signal,
+    },
+    { signal, sessionId },
+  );
+  const body = await parseJson(res);
+  if (!res.ok) {
+    throw new ShareGalleryError(
+      extractMessage(body, `Could not unlock gallery (${res.status})`),
+      res.status,
+      body,
+    );
+  }
+  const accessToken = str((body as Raw | null)?.accessToken);
+  if (accessToken) {
+    writeGalleryAccessToken(sessionId, accessToken);
+  }
+  const normalized = normalizeShareGalleryBody(body);
+  if (!normalized) {
+    throw new ShareGalleryError("Could not load gallery.", 500, body);
+  }
+  return normalized;
 }
 
 /**
  * Public client gallery payload for a share link.
+ * Throws {@link ShareGalleryPasswordRequiredError} when the gallery is locked (401).
  */
 export async function getShareGallery(
   key: PublicGalleryKey | string,
   signal?: AbortSignal,
-  options?: { baseOrigin?: string },
+  options?: { baseOrigin?: string; sessionId?: string },
 ): Promise<NormalizedShareGallery> {
   const resolved = resolvePublicGalleryKey(key);
-  const body = await publicJson<PublicGalleryResponse>(
+  const fetchOptions = publicGallerySessionOptions(resolved, {
+    baseOrigin: options?.baseOrigin,
+    signal,
+    sessionId: options?.sessionId,
+  });
+  const res = await publicFetch(
     publicGalleryApiPath(resolved),
     { method: "GET", signal, cache: "no-store" },
-    "Could not load gallery",
-    { baseOrigin: options?.baseOrigin, signal },
+    fetchOptions,
   );
+  const body = await parseJson(res);
+  if (res.status === 401 && isShareGalleryPasswordRequiredBody(body)) {
+    if (fetchOptions.sessionId) clearGalleryAccessToken(fetchOptions.sessionId);
+    throw new ShareGalleryPasswordRequiredError(
+      extractMessage(body, "Gallery password required"),
+      body,
+    );
+  }
+  if (!res.ok) {
+    throw new ShareGalleryError(
+      extractMessage(body, `Could not load gallery (${res.status})`),
+      res.status,
+      body,
+    );
+  }
   const normalized = normalizeShareGalleryBody(body);
   if (!normalized) {
     throw new ShareGalleryError("Could not load gallery.", 500, body);
@@ -1186,7 +1554,7 @@ export async function postShareGalleryPhotoComment(
       signal,
     },
     "Could not save comment",
-    { signal },
+    publicGallerySessionOptions(resolved, { signal }),
   );
 }
 
@@ -1208,7 +1576,7 @@ export async function toggleShareGalleryPhotoReject(
       signal,
     },
     "Could not update rejection",
-    { signal },
+    publicGallerySessionOptions(resolved, { signal }),
   );
 }
 
@@ -1228,7 +1596,7 @@ export async function postShareGalleryFinalFlag(
       signal,
     },
     "Could not flag this edit",
-    { signal },
+    publicGallerySessionOptions(resolved, { signal }),
   );
 }
 
@@ -1248,7 +1616,7 @@ export async function patchShareGalleryFinalComment(
       signal,
     },
     "Could not update comment",
-    { signal },
+    publicGallerySessionOptions(resolved, { signal }),
   );
 }
 
@@ -1272,7 +1640,7 @@ export async function submitShareGallerySelectionsToPhotographer(
     publicGalleryApiPath(resolved, "/submit-selections"),
     { method: "POST", signal },
     "Could not submit selections",
-    { signal },
+    publicGallerySessionOptions(resolved, { signal }),
   );
 }
 
@@ -1285,6 +1653,15 @@ export function getShareFinalDownloadUrl(
   return apiUrl(
     publicGalleryApiPath(resolved, `/finals/${encodeURIComponent(finalId)}/download`),
   );
+}
+
+function shareGalleryAuthorizedFetchInit(
+  key: PublicGalleryKey | string,
+  init: RequestInit = {},
+): RequestInit {
+  const headers = new Headers(init.headers ?? {});
+  appendGalleryAccessToken(headers, publicGallerySessionId(key));
+  return { ...init, headers, credentials: "include" };
 }
 
 /**
@@ -1329,7 +1706,7 @@ export async function fetchShareFinalDownloadBlob(
   if (!url) {
     throw new ShareGalleryError(`Could not download “${f.name}”.`, 400, null);
   }
-  const res = await fetch(url);
+  const res = await fetch(url, shareGalleryAuthorizedFetchInit(key));
   const body = res.ok ? null : await parseJson(res);
   if (!res.ok) {
     throw new ShareGalleryError(
@@ -1418,7 +1795,7 @@ export async function downloadShareFinalsZip(
     if (!url) {
       throw new ShareGalleryError(`Could not download “${f.name}”.`, 400, null);
     }
-    const res = await fetch(url);
+    const res = await fetch(url, shareGalleryAuthorizedFetchInit(key));
     if (!res.ok) {
       const body = await parseJson(res);
       throw new ShareGalleryError(

@@ -31,24 +31,36 @@ export type ListClientsResponse = {
 export class ApiError extends HttpError {}
 
 type RawClient = {
-  _id: string;
-  name: string;
+  _id?: string;
+  id?: string;
+  name?: string;
   email?: string;
   phone?: string;
   contact?: string;
-  location: string;
+  location?: string;
   createdBy?: string;
   createdAt?: string;
   updatedAt?: string;
 };
 
-function mapClient(raw: RawClient): ApiClient {
+function readClientRecordId(raw: { _id?: unknown; id?: unknown }): string {
+  const fromId = raw.id != null ? String(raw.id).trim() : "";
+  if (fromId && fromId !== "undefined") return fromId;
+  const fromMongoId = raw._id != null ? String(raw._id).trim() : "";
+  if (fromMongoId && fromMongoId !== "undefined") return fromMongoId;
+  return "";
+}
+
+function mapClient(raw: RawClient): ApiClient | null {
+  const _id = readClientRecordId(raw);
+  const name = raw.name?.trim() ?? "";
+  if (!_id || !name) return null;
   return {
-    _id: String(raw._id),
-    name: raw.name,
+    _id,
+    name,
     email: raw.email?.trim() ?? "",
     contact: (raw.phone ?? raw.contact ?? "").trim(),
-    location: raw.location,
+    location: raw.location?.trim() ?? "",
     createdBy: raw.createdBy,
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt,
@@ -86,8 +98,33 @@ export async function listClients(search = ""): Promise<ListClientsResponse> {
     "Failed to load clients",
     ApiError,
   );
-  const clients = (res.clients ?? []).map(mapClient);
+  const clients = (res.clients ?? [])
+    .map((raw) => mapClient(raw))
+    .filter((client): client is ApiClient => client != null);
   return { count: res.count ?? clients.length, clients };
+}
+
+export async function loadClientNameById(): Promise<Map<string, string>> {
+  try {
+    const { clients } = await listClients();
+    const map = new Map<string, string>();
+    for (const c of clients) {
+      const name = c.name.trim();
+      if (!name) continue;
+      map.set(c._id, name);
+    }
+    return map;
+  } catch {
+    return new Map();
+  }
+}
+
+function requireMappedClient(raw: RawClient, context: string): ApiClient {
+  const client = mapClient(raw);
+  if (!client) {
+    throw new ApiError(`Invalid client record (${context}).`, 500, raw);
+  }
+  return client;
 }
 
 export async function getClient(id: string): Promise<ApiClient> {
@@ -97,7 +134,7 @@ export async function getClient(id: string): Promise<ApiClient> {
     "Failed to load client",
     ApiError,
   );
-  return mapClient(res.client);
+  return requireMappedClient(res.client, "getClient");
 }
 
 export async function createClient(input: ClientInput): Promise<ApiClient> {
@@ -110,7 +147,7 @@ export async function createClient(input: ClientInput): Promise<ApiClient> {
     "Failed to create client",
     ApiError,
   );
-  return mapClient(res.client);
+  return requireMappedClient(res.client, "createClient");
 }
 
 export async function updateClient(
@@ -126,7 +163,7 @@ export async function updateClient(
     "Failed to update client",
     ApiError,
   );
-  return mapClient(res.client);
+  return requireMappedClient(res.client, "updateClient");
 }
 
 export async function deleteClient(id: string): Promise<ApiClient> {
@@ -136,5 +173,5 @@ export async function deleteClient(id: string): Promise<ApiClient> {
     "Failed to delete client",
     ApiError,
   );
-  return mapClient(res.client);
+  return requireMappedClient(res.client, "deleteClient");
 }

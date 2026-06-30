@@ -7,7 +7,7 @@ import {
   estimateDemoBytesForNewRawAssets,
 } from "@/lib/usage-api";
 
-export type PlanId = "free" | "studio" | "pro";
+export type PlanId = "free" | "starter" | "studio" | "pro";
 
 export type PlanDefinition = {
   id: PlanId;
@@ -26,33 +26,42 @@ export const PLANS: Record<PlanId, PlanDefinition> = {
   free: {
     id: "free",
     label: "Free",
-    description: "Start with two client galleries and enough space for light jobs.",
+    description: "5 GB storage for getting started.",
     storageBytes: 5 * 1024 * 1024 * 1024,
     maxGalleries: 2,
     priceLabel: "Free",
     perks: ["5 GB storage", "2 galleries", "Share links & client selection"],
   },
-  studio: {
-    id: "studio",
-    label: "Studio",
-    description: "For busy photographers juggling several active deliveries.",
-    storageBytes: 50 * 1024 * 1024 * 1024,
-    maxGalleries: 25,
-    priceLabel: "GHS 149 / mo (demo)",
-    perks: ["50 GB storage", "Up to 25 galleries", "Priority support (coming soon)"],
+  starter: {
+    id: "starter",
+    label: "Starter",
+    description: "25 GB storage for growing studios.",
+    storageBytes: 25 * 1024 * 1024 * 1024,
+    maxGalleries: 3,
+    priceLabel: "GHS 79 / mo",
+    perks: ["25 GB storage", "3 galleries", "Share links & watermarks"],
   },
   pro: {
     id: "pro",
     label: "Pro",
-    description: "Maximum capacity and unlimited galleries for high-volume studios.",
+    description: "100 GB storage for busy photographers.",
+    storageBytes: 100 * 1024 * 1024 * 1024,
+    maxGalleries: null,
+    priceLabel: "GHS 199 / mo",
+    perks: ["100 GB storage", "Unlimited galleries", "Priority support (coming soon)"],
+  },
+  studio: {
+    id: "studio",
+    label: "Studio",
+    description: "500 GB storage for high-volume studios.",
     storageBytes: 500 * 1024 * 1024 * 1024,
     maxGalleries: null,
-    priceLabel: "GHS 399 / mo (demo)",
+    priceLabel: "GHS 499 / mo",
     perks: ["500 GB storage", "Unlimited galleries", "Team seats (coming soon)"],
   },
 };
 
-const PLAN_IDS = new Set<PlanId>(["free", "studio", "pro"]);
+const PLAN_IDS = new Set<PlanId>(["free", "starter", "studio", "pro"]);
 
 function normEmail(email: string) {
   return email.trim().toLowerCase();

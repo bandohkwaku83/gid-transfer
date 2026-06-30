@@ -3,6 +3,7 @@
 import {
   ChevronLeft,
   ChevronRight,
+  FileUp,
   Mail,
   MapPin,
   Pencil,
@@ -16,8 +17,16 @@ import { Select } from "antd";
 import { FormSearchInput, dashboardSearchFieldClassName } from "@/components/ui/form-input";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CreateClientModal } from "@/components/photographer/create-client-modal";
+import { ImportClientsModal } from "@/components/photographer/import-clients-modal";
 import { useToast } from "@/components/toast-provider";
 import { deleteClient, listClients, type ApiClient } from "@/lib/clients-api";
+import {
+  DashboardPageHeader,
+  dashboardPageHeaderChipClassName,
+  dashboardPageHeaderCtaClassName,
+  dashboardPageHeaderDescriptionClassName,
+  dashboardPageHeaderTitleClassName,
+} from "@/components/dashboard/dashboard-page-header";
 import { cn } from "@/lib/utils";
 
 function initials(name: string): string {
@@ -31,6 +40,7 @@ export default function ClientsPage() {
   const { showToast } = useToast();
 
   const [clientModalOpen, setClientModalOpen] = useState(false);
+  const [importModalOpen, setImportModalOpen] = useState(false);
   const [editing, setEditing] = useState<ApiClient | null>(null);
 
   const [clients, setClients] = useState<ApiClient[]>([]);
@@ -98,6 +108,23 @@ export default function ClientsPage() {
     });
   }
 
+  function handleImported(imported: ApiClient[]) {
+    if (imported.length === 0) return;
+    setClients((prev) => {
+      const byId = new Map(prev.map((c) => [c._id, c]));
+      for (const client of imported) {
+        byId.set(client._id, client);
+      }
+      const merged = Array.from(byId.values());
+      merged.sort((a, b) => {
+        const ta = new Date(a.createdAt ?? 0).getTime();
+        const tb = new Date(b.createdAt ?? 0).getTime();
+        return tb - ta;
+      });
+      return merged;
+    });
+  }
+
   const handleDelete = useCallback(
     async (client: ApiClient) => {
       if (pendingDeleteId) return;
@@ -155,37 +182,25 @@ export default function ClientsPage() {
 
   return (
     <div className="dashboard-page space-y-6">
-      <section className="relative overflow-hidden rounded-2xl border border-slate-800/50 bg-gradient-to-br from-slate-950 via-indigo-950/85 to-slate-900 shadow-lg shadow-slate-900/20">
-        <div
-          className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-brand/15 blur-3xl"
-          aria-hidden
-        />
-        <div className="relative flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-[1.65rem]">
-              Clients
-            </h1>
-            <p className="mt-2 max-w-xl text-sm leading-relaxed text-slate-400">
-              Contacts you attach to galleries and bookings. Search, edit, and keep details in one
-              place.
+      <DashboardPageHeader innerClassName="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <h1 className={dashboardPageHeaderTitleClassName()}>Clients</h1>
+          <p className={dashboardPageHeaderDescriptionClassName()}>
+            Contacts you attach to galleries and bookings. Search, edit, and keep details in one
+            place.
+          </p>
+          {clientCountLabel ? (
+            <p className={dashboardPageHeaderChipClassName("mt-3")}>
+              <Users className="h-3.5 w-3.5 text-brand/70" aria-hidden />
+              <span className="font-semibold">{clientCountLabel}</span>
             </p>
-            {clientCountLabel ? (
-              <p className="mt-3 inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300">
-                <Users className="h-3.5 w-3.5 text-slate-400" aria-hidden />
-                <span className="font-semibold text-white/90">{clientCountLabel}</span>
-              </p>
-            ) : null}
-          </div>
-          <button
-            type="button"
-            onClick={openCreate}
-            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white shadow-md transition hover:bg-brand-hover"
-          >
-            <Plus className="h-4 w-4" aria-hidden />
-            Add client
-          </button>
+          ) : null}
         </div>
-      </section>
+        <button type="button" onClick={openCreate} className={dashboardPageHeaderCtaClassName()}>
+          <Plus className="h-4 w-4" aria-hidden />
+          Add client
+        </button>
+      </DashboardPageHeader>
 
       {error ? (
         <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
@@ -202,15 +217,29 @@ export default function ClientsPage() {
 
       {!error ? (
         <section className="space-y-4">
-          <FormSearchInput
-            autoComplete="off"
-            placeholder="Search name, email, phone, or location…"
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            prefix={<Search className="h-4 w-4 text-zinc-400" aria-hidden />}
-            aria-label="Search clients"
-            className={cn("max-w-2xl", dashboardSearchFieldClassName, "[&_.ant-input-affix-wrapper]:!py-3")}
-          />
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <FormSearchInput
+              autoComplete="off"
+              placeholder="Search name, email, phone, or location…"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              prefix={<Search className="h-4 w-4 text-zinc-400" aria-hidden />}
+              aria-label="Search clients"
+              className={cn(
+                "min-w-0 flex-1",
+                dashboardSearchFieldClassName,
+                "[&_.ant-input-affix-wrapper]:!py-3",
+              )}
+            />
+            <button
+              type="button"
+              onClick={() => setImportModalOpen(true)}
+              className="inline-flex shrink-0 items-center justify-center gap-2 self-end rounded-xl border border-[#55001F] bg-white px-4 py-3 text-sm font-semibold text-zinc-800 shadow-sm transition hover:bg-[#55001F]/5 sm:self-auto dark:bg-zinc-950 dark:text-zinc-100 dark:hover:bg-[#55001F]/10"
+            >
+              <FileUp className="h-4 w-4" aria-hidden />
+              Import
+            </button>
+          </div>
 
           {loading ? (
             <ul className="space-y-3">
@@ -380,6 +409,12 @@ export default function ClientsPage() {
           setEditing(null);
         }}
         onSaved={handleSaved}
+      />
+
+      <ImportClientsModal
+        open={importModalOpen}
+        onClose={() => setImportModalOpen(false)}
+        onImported={handleImported}
       />
     </div>
   );

@@ -1,5 +1,6 @@
 import type { ApiClient } from "@/lib/clients-api";
 import type { GalleryCoverFrame } from "@/lib/gallery-cover-frame";
+import type { GalleryImageLayout } from "@/lib/gallery-image-layout";
 import type { ApiGallerySet } from "@/lib/gallery-sets-api";
 import { HttpError } from "@/lib/http";
 
@@ -12,6 +13,8 @@ export type ApiFolderShare = {
   sharedAt?: string | null;
   expiresAt?: string | null;
   viewCount?: number;
+  /** Client-initiated final / gallery downloads tracked by the backend. */
+  downloadCount?: number;
   linkExpiryPreset?: string | null;
   selectionSubmittedAt?: string | null;
   selectionLocked?: boolean;
@@ -66,6 +69,8 @@ export type ApiFolderMedia = {
   rawMediaId?: string;
   /** Gallery set (subsection) this media belongs to, if any. */
   setId?: string | null;
+  /** False while thumbnails / watermarked previews are still processing. */
+  derivativesReady?: boolean;
 };
 
 export type { ApiGallerySet };
@@ -77,6 +82,10 @@ export type ApiFolder = {
   eventName?: string;
   eventDate: string;
   description: string;
+  /** Shoot category id from bookings meta (e.g. `wedding`). */
+  galleryType?: string;
+  /** Client gallery slug for `/client/{slug}` on the studio host. */
+  slug?: string;
   /** Relative path stored on the server (e.g. "uploads/covers/..."). */
   coverImage?: string;
   /** Fully-qualified URL when available (preferred for rendering). */
@@ -92,8 +101,24 @@ export type ApiFolder = {
   coverFocalY?: number;
   /** Client gallery cover presentation selected by the photographer. */
   coverFrame?: GalleryCoverFrame;
+  /** True when cover style/design settings were saved for this gallery. */
+  coverStyleConfigured?: boolean;
   /** Backdrop color for cover styles that use a solid hero surface (hex, e.g. `#18181b`). */
   coverColor?: string;
+  /** Cover hero title text color (hex). Omitted = auto contrast from backdrop. */
+  coverTextColor?: string;
+  /** Cover hero “View gallery” button color (hex). Omitted = auto contrast from backdrop. */
+  coverButtonColor?: string;
+  /** Default photo grid layout on the client share gallery. */
+  imageLayout?: GalleryImageLayout;
+  /** Client gallery title typography (design-settings). */
+  titleFont?: string;
+  /** Client gallery body typography (design-settings). */
+  bodyFont?: string;
+  /** When true, clients may download photos from the share gallery. */
+  allowDownloads?: boolean;
+  /** When true, clients must enter a password/PIN before viewing. */
+  sharePasswordEnabled?: boolean;
   usingDefaultCover?: boolean;
   /** Client hero frozen when the share link was activated (admin working cover may differ). */
   shareCoverImageUrl?: string;
@@ -101,6 +126,8 @@ export type ApiFolder = {
   shareCoverFocalX?: number;
   shareCoverFocalY?: number;
   shareCoverFrame?: GalleryCoverFrame;
+  /** Frozen grid layout at share-link activation when backend snapshots it. */
+  shareImageLayout?: GalleryImageLayout;
   share?: ApiFolderShare;
   /** Fully-qualified shareable URL (e.g. https://example.com/share/<code>). */
   shareUrl?: string;
@@ -126,6 +153,10 @@ export type ApiFolder = {
   finalMedia?: ApiFolderMedia[];
   /** When false, client gallery may hide final delivery UI until backend enables it. */
   finalDelivery?: boolean;
+  /** Per-gallery preview watermark for raw uploads (from upload-settings). */
+  watermarkPreviewEnabled?: boolean;
+  /** Per-gallery watermark for finals (from final-settings). */
+  watermarkFinalsEnabled?: boolean;
   /** When true, finals are payment-locked for the client until unlock (some backends send this without per-media `locked`). */
   finalsPaymentLocked?: boolean;
   /** Extra protection hints for client gallery (e.g. discourage saving screenshots). */
@@ -155,6 +186,10 @@ export type CreateFolderInput = {
   eventName: string;
   eventDate: string;
   description: string;
+  /** Shoot category id from bookings meta (e.g. `wedding`). */
+  galleryType: string;
+  /** Client gallery slug for `/client/{slug}` on the studio host. */
+  slug: string;
   /** Share link expiry preset id, e.g. `30d`, `never` (must match API / share-link-expiry-presets). */
   linkExpiry: string;
   coverImage?: File | null;
@@ -168,12 +203,17 @@ export type UpdateFolderInput = {
   eventName?: string;
   eventDate?: string;
   description?: string;
+  galleryType?: string;
+  slug?: string;
   coverImage?: File | null;
   useDefaultCover?: boolean;
   coverFocalX?: number;
   coverFocalY?: number;
   coverFrame?: GalleryCoverFrame;
   coverColor?: string;
+  imageLayout?: GalleryImageLayout;
+  titleFont?: string;
+  bodyFont?: string;
   backgroundMusicEnabled?: boolean;
 };
 

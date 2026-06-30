@@ -9,6 +9,8 @@ import {
   patchGalleryFinalReply,
   patchGalleryFinalsLock,
   patchGallerySelectionReply,
+  reorderGalleryFinals,
+  reorderGalleryUploads,
   uploadGalleryFinals,
   uploadGalleryPhotos,
 } from "@/lib/gallery-media-api";
@@ -21,20 +23,38 @@ import {
   getGalleryDetail,
   listGalleries,
   mapGalleryToApiFolder,
-  restoreGallery,
   revokeGalleryShareLink,
   shareLinkExpiryPresetToDays,
   toggleGalleryBackgroundMusic,
   trashRestoreBefore,
   uiStatusToGalleryStatus,
   updateGallery,
+  updateGalleryClientAccess,
   updateGalleryCoverFocalPoint,
+  updateGalleryDesignSettings,
+  galleryDesignInputToApiBody,
   updateGallerySelectionSettings,
+  updateGalleryUploadSettings,
+  updateGalleryFinalSettings,
   uploadGalleryBackgroundMusic,
 } from "@/lib/galleries-api";
 import {
+  emptyTrash,
+  listTrash,
+  mapEmptyTrashToPurgeResult,
+  restoreTrashItems,
+} from "@/lib/trash-api";
+import {
   getDemoFolderApiModel,
 } from "@/lib/demo-api-bridge";
+import {
+  buildDemoTrashPreview,
+  hideAllTrashPreview,
+  hideTrashPreviewFolder,
+  hideTrashPreviewMedia,
+  isTrashPreviewFolderId,
+  mergeTrashWithDemoPreview,
+} from "@/lib/demo-trash-preview";
 import {
   createDemoGallerySet,
   deleteDemoGallerySet,
@@ -42,7 +62,8 @@ import {
   listDemoGallerySets,
   loadProjectById,
   patchFolderOverride,
-  purgeFolderFromTrashDemo,
+  reorderDemoProjectFinalMedia,
+  reorderDemoProjectRawMedia,
   saveProjectSnapshot,
   updateDemoGallerySet,
 } from "@/lib/demo-data";
@@ -52,8 +73,10 @@ import {
   listGallerySets,
   updateGallerySet,
 } from "@/lib/gallery-sets-api";
+import { loadClientNameById } from "@/lib/clients-api";
 import { normalizeGalleryCoverColor } from "@/lib/gallery-cover-color";
 import { normalizeGalleryCoverFrame } from "@/lib/gallery-cover-frame";
+import { normalizeGalleryImageLayout } from "@/lib/gallery-image-layout";
 import {
   incomingFilenamesConflictingWithFolder,
   isLocalDemoFolderId,
@@ -84,7 +107,7 @@ import {
 
 export * from "@/lib/folders/types";
 export * from "@/lib/folders/helpers";
-export { generateGalleryDescription, type GalleryListCounts } from "@/lib/galleries-api";
+export { generateGalleryDescription, getGalleriesMeta, type GalleryListCounts, type GalleryTypeMeta } from "@/lib/galleries-api";
 
 async function delay(ms = 35) {
   await new Promise((r) => setTimeout(r, ms));
@@ -106,7 +129,7 @@ function emptyTrashMediaResult(restoreBefore: string): BulkMediaSoftDeleteResult
 
 function applyFolderPresentationOverride(folder: ApiFolder): ApiFolder {
   const override = getFolderOverride(folder._id);
-  if (!override?.coverFrame && !override?.coverColor) return folder;
+  if (!override?.coverFrame && !override?.coverColor && !override?.imageLayout) return folder;
   return {
     ...folder,
     ...(override?.coverFrame
@@ -114,6 +137,9 @@ function applyFolderPresentationOverride(folder: ApiFolder): ApiFolder {
       : {}),
     ...(override?.coverColor
       ? { coverColor: normalizeGalleryCoverColor(override.coverColor) }
+      : {}),
+    ...(override?.imageLayout
+      ? { imageLayout: normalizeGalleryImageLayout(override.imageLayout) }
       : {}),
   };
 }
@@ -139,73 +165,151 @@ export async function listFoldersTrash(options: {
   mediaLimit?: number;
 } = {}): Promise<ListFoldersTrashResponse> {
   void options;
-  const res = await listGalleries({ trash: true });
-  const retentionDays = 30;
-  return {
-    retentionDays,
-    count: res.galleries.length,
-    folders: res.galleries.map((g) => {
-      const folder = mapGalleryToApiFolder(g);
-      const deletedAt = g.deletedAt ?? new Date().toISOString();
-      return {
-        folder,
-        deletedAt,
-        restoreBefore: trashRestoreBefore(deletedAt, retentionDays),
-      };
-    }),
-    deletedMedia: [] as TrashMediaRow[],
-    deletedMediaTotal: 0,
-    deletedMediaPreviewLimit: 0,
-  };
+  const apiTrash = await listTrash();
+  return mergeTrashWithDemoPreview(apiTrash);
 }
 
 export async function listFoldersMediaTrash(
   _params: ListFoldersMediaTrashParams = {},
 ): Promise<ListFoldersMediaTrashResponse> {
-  await delay();
-  return { items: [], total: 0, page: 1, limit: _params.limit ?? 50 };
+  void _params;
+  return { items: [], total: 0, page: 1, limit: 50 };
+}
+
+export async function restoreFoldersTrash(payload: {
+  folderIds?: string[];
+  mediaIds?: string[];
+}): Promise<{ message: string; restoredFolderCount: number; restoredMediaCount: number }> {
+  const galleryIds = [...(payload.folderIds ?? [])];
+  const photoIds = [...(payload.mediaIds ?? [])];
+
+  for (const id of galleryIds) {
+    if (isTrashPreviewFolderId(id)) {
+      hideTrashPreviewFolder(id);
+    }
+  }
+  for (const photoId of photoIds) {
+    if (photoId.startsWith("trash-preview-")) {
+      const row = buildDemoTrashPreview().deletedMedia.find((m) => m.mediaId === photoId);
+      if (row) hideTrashPreviewMedia(row.folderId, row.mediaId);
+    }
+  }
+
+  const realGalleryIds = galleryIds.filter((id) => !isTrashPreviewFolderId(id));
+  const realPhotoIds = photoIds.filter((id) => !id.startsWith("trash-preview-"));
+
+  let restoredFolderCount = galleryIds.length - realGalleryIds.length;
+  let restoredMediaCount = photoIds.length - realPhotoIds.length;
+
+  if (realGalleryIds.length || realPhotoIds.length) {
+    const result = await restoreTrashItems({
+      galleryIds: realGalleryIds,
+      photoIds: realPhotoIds,
+    });
+    restoredFolderCount += result.restored?.galleries ?? 0;
+    restoredMediaCount += result.restored?.photos ?? 0;
+    return {
+      message: result.message ?? "Trash items restored.",
+      restoredFolderCount,
+      restoredMediaCount,
+    };
+  }
+
+  return {
+    message: "Trash items restored.",
+    restoredFolderCount,
+    restoredMediaCount,
+  };
 }
 
 export async function restoreFolderFromTrash(folderId: string): Promise<ApiFolder> {
-  const { gallery } = await restoreGallery(folderId);
-  return mapGalleryToApiFolder(gallery);
+  if (isTrashPreviewFolderId(folderId)) {
+    await delay();
+    const row = buildDemoTrashPreview().folders.find((r) => r.folder._id === folderId);
+    hideTrashPreviewFolder(folderId);
+    if (!row) {
+      throw new FoldersApiError("Preview gallery no longer in trash.", 404, null);
+    }
+    return row.folder;
+  }
+  await restoreTrashItems({ galleryIds: [folderId] });
+  return getFolder(folderId);
 }
 
 export async function restoreFolderTrashedMedia(
   _folderId: string,
-  _mediaId: string,
+  mediaId: string,
 ): Promise<{ message: string; kind: string; mediaId: string }> {
-  await delay();
-  return { message: "Media restored", kind: "raw", mediaId: _mediaId };
+  if (mediaId.startsWith("trash-preview-")) {
+    await delay();
+    hideTrashPreviewMedia(_folderId, mediaId);
+    return { message: "Media restored", kind: "raw", mediaId };
+  }
+  await restoreTrashItems({ photoIds: [mediaId] });
+  return { message: "Media restored", kind: "raw", mediaId };
 }
 
 export async function purgeFoldersTrash(payload: PurgeFoldersTrashPayload): Promise<TrashPurgeResult> {
-  await delay();
   if ("all" in payload && payload.all) {
-    const res = await listGalleries({ trash: true });
-    for (const g of res.galleries) {
-      purgeFolderFromTrashDemo(g.id);
-    }
-    return { message: "Trash emptied.", purgedFolderCount: res.galleries.length, purgedMediaCount: 0 };
+    const preview = buildDemoTrashPreview();
+    hideAllTrashPreview();
+    const result = await emptyTrash();
+    const mapped = mapEmptyTrashToPurgeResult(result);
+    return {
+      ...mapped,
+      purgedFolderCount: mapped.purgedFolderCount + preview.folders.length,
+      purgedMediaCount: mapped.purgedMediaCount + preview.deletedMedia.length,
+    };
   }
   if ("purgeAll" in payload && payload.purgeAll) {
-    const res = await listGalleries({ trash: true });
-    for (const g of res.galleries) {
-      purgeFolderFromTrashDemo(g.id);
-    }
-    return { message: "Trash emptied.", purgedFolderCount: res.galleries.length, purgedMediaCount: 0 };
+    const preview = buildDemoTrashPreview();
+    hideAllTrashPreview();
+    const result = await emptyTrash();
+    const mapped = mapEmptyTrashToPurgeResult(result);
+    return {
+      ...mapped,
+      purgedFolderCount: mapped.purgedFolderCount + preview.folders.length,
+      purgedMediaCount: mapped.purgedMediaCount + preview.deletedMedia.length,
+    };
   }
+
   const sel = payload as { folderIds?: string[]; mediaIds?: string[] };
-  let fc = 0;
+  let previewFolderCount = 0;
+  let previewMediaCount = 0;
+
   for (const id of sel.folderIds ?? []) {
-    purgeFolderFromTrashDemo(id);
-    fc += 1;
+    if (isTrashPreviewFolderId(id)) {
+      hideTrashPreviewFolder(id);
+      previewFolderCount += 1;
+    }
   }
-  void sel.mediaIds;
+  for (const mediaId of sel.mediaIds ?? []) {
+    if (mediaId.startsWith("trash-preview-")) {
+      const row = buildDemoTrashPreview().deletedMedia.find((m) => m.mediaId === mediaId);
+      if (row) {
+        hideTrashPreviewMedia(row.folderId, row.mediaId);
+        previewMediaCount += 1;
+      }
+    }
+  }
+
+  const galleryIds = (sel.folderIds ?? []).filter((id) => !isTrashPreviewFolderId(id));
+  const photoIds = (sel.mediaIds ?? []).filter((id) => !id.startsWith("trash-preview-"));
+
+  if (!galleryIds.length && !photoIds.length) {
+    return {
+      message: "Trash purge completed.",
+      purgedFolderCount: previewFolderCount,
+      purgedMediaCount: previewMediaCount,
+    };
+  }
+
+  const result = await emptyTrash({ galleryIds, photoIds });
+  const mapped = mapEmptyTrashToPurgeResult(result);
   return {
-    message: "Trash purge completed.",
-    purgedFolderCount: fc,
-    purgedMediaCount: 0,
+    ...mapped,
+    purgedFolderCount: mapped.purgedFolderCount + previewFolderCount,
+    purgedMediaCount: mapped.purgedMediaCount + previewMediaCount,
   };
 }
 
@@ -214,22 +318,21 @@ export async function listFolders(params: {
   search?: string;
   status?: string;
 } = {}): Promise<ApiFolder[]> {
-  const res = await listGalleries({ status: params.status ?? "all" });
-  let folders = res.galleries.map((g) => applyFolderPresentationOverride(mapGalleryToApiFolder(g)));
+  const [res, clientNameById] = await Promise.all([
+    listGalleries({
+      status: params.status ?? "all",
+      search: params.search,
+    }),
+    loadClientNameById(),
+  ]);
+  let folders = res.galleries.map((g) =>
+    applyFolderPresentationOverride(mapGalleryToApiFolder(g, clientNameById)),
+  );
   if (params.clientId?.trim()) {
     const id = params.clientId.trim();
     folders = folders.filter((f) => {
       const c = f.client;
       return (typeof c === "string" ? c : c._id) === id;
-    });
-  }
-  if (params.search?.trim()) {
-    const q = params.search.trim().toLowerCase();
-    folders = folders.filter((f) => {
-      const title = (f.eventName ?? "").toLowerCase();
-      const desc = (f.description ?? "").toLowerCase();
-      const clientName = typeof f.client === "object" ? (f.client.name ?? "").toLowerCase() : "";
-      return title.includes(q) || desc.includes(q) || clientName.includes(q);
     });
   }
   return folders;
@@ -245,8 +348,14 @@ export async function listFoldersWithCounts(params: {
   search?: string;
   status?: string;
 } = {}): Promise<ListFoldersWithCountsResult> {
-  const res = await listGalleries({ status: params.status ?? "all" });
-  let folders = res.galleries.map((g) => mapGalleryToApiFolder(g));
+  const [res, clientNameById] = await Promise.all([
+    listGalleries({
+      status: params.status ?? "all",
+      search: params.search,
+    }),
+    loadClientNameById(),
+  ]);
+  let folders = res.galleries.map((g) => mapGalleryToApiFolder(g, clientNameById));
   if (params.clientId?.trim()) {
     const id = params.clientId.trim();
     folders = folders.filter((f) => {
@@ -254,31 +363,26 @@ export async function listFoldersWithCounts(params: {
       return (typeof c === "string" ? c : c._id) === id;
     });
   }
-  if (params.search?.trim()) {
-    const q = params.search.trim().toLowerCase();
-    folders = folders.filter((f) => {
-      const title = (f.eventName ?? "").toLowerCase();
-      const desc = (f.description ?? "").toLowerCase();
-      const clientName = typeof f.client === "object" ? (f.client.name ?? "").toLowerCase() : "";
-      return title.includes(q) || desc.includes(q) || clientName.includes(q);
-    });
-  }
   return { folders, counts: res.counts };
 }
 
 export async function getFolder(id: string): Promise<ApiFolder> {
   try {
-    const [gallery, media, sets] = await Promise.all([
+    const [gallery, media, sets, clientNameById] = await Promise.all([
       getGalleryDetail(id),
       fetchGalleryMedia(id),
       listGallerySets(id).catch(() => []),
+      loadClientNameById(),
     ]);
     return applyFolderPresentationOverride({
-      ...mapGalleryToApiFolder(gallery),
+      ...mapGalleryToApiFolder(gallery, clientNameById),
       uploads: media.uploads,
       selection: media.selection,
       finals: media.finals,
       flaggedFinals: media.flaggedFinals,
+      ...(media.selectionLocked !== undefined
+        ? { selectionLocked: media.selectionLocked }
+        : {}),
       sets,
     });
   } catch (e) {
@@ -288,6 +392,11 @@ export async function getFolder(id: string): Promise<ApiFolder> {
     }
     throw e;
   }
+}
+
+/** Metadata-only gallery writes omit uploads/finals — reload so the dashboard keeps media visible. */
+async function reloadFolderAfterGalleryPatch(folderId: string): Promise<ApiFolder> {
+  return getFolder(folderId);
 }
 
 export async function listFolderGallerySets(folderId: string) {
@@ -333,6 +442,8 @@ export async function createFolder(input: CreateFolderInput): Promise<ApiFolder>
       name: input.eventName.trim(),
       eventDate: input.eventDate,
       description: input.description.trim(),
+      galleryType: input.galleryType,
+      slug: input.slug,
       shareLinkExpiryDays: shareLinkExpiryPresetToDays(input.linkExpiry),
       useDefaultCover: coverFile ? false : (input.useDefaultCover ?? true),
       generateDescriptionAi: false,
@@ -355,7 +466,8 @@ export async function createFolder(input: CreateFolderInput): Promise<ApiFolder>
     result = withFocal;
   }
 
-  return mapGalleryToApiFolder(result);
+  const clientNameById = await loadClientNameById();
+  return mapGalleryToApiFolder(result, clientNameById);
 }
 
 export async function updateFolder(id: string, input: UpdateFolderInput): Promise<ApiFolder> {
@@ -363,10 +475,8 @@ export async function updateFolder(id: string, input: UpdateFolderInput): Promis
   if (input.eventName !== undefined) body.name = input.eventName.trim();
   if (input.eventDate !== undefined) body.eventDate = input.eventDate.slice(0, 10);
   if (input.description !== undefined) body.description = input.description.trim();
-  if (input.coverFrame !== undefined) body.coverFrame = normalizeGalleryCoverFrame(input.coverFrame);
-  if (input.coverColor !== undefined) {
-    body.coverColor = input.coverColor;
-  }
+  if (input.galleryType !== undefined) body.galleryType = input.galleryType;
+  if (input.slug !== undefined) body.slug = input.slug;
 
   const coverFile = input.coverImage instanceof File ? input.coverImage : null;
   if (coverFile) {
@@ -376,11 +486,17 @@ export async function updateFolder(id: string, input: UpdateFolderInput): Promis
   }
 
   const hasPutFields = Object.keys(body).length > 0 || Boolean(coverFile);
+  const hasDesign =
+    input.coverFrame !== undefined ||
+    input.coverColor !== undefined ||
+    input.imageLayout !== undefined ||
+    input.titleFont !== undefined ||
+    input.bodyFont !== undefined;
   const hasFocal =
     input.coverFocalX !== undefined && input.coverFocalY !== undefined;
   const hasMusicToggle = input.backgroundMusicEnabled !== undefined;
 
-  if (!hasPutFields && !hasFocal && !hasMusicToggle) {
+  if (!hasPutFields && !hasDesign && !hasFocal && !hasMusicToggle) {
     return getFolder(id);
   }
 
@@ -388,6 +504,23 @@ export async function updateFolder(id: string, input: UpdateFolderInput): Promis
 
   if (hasPutFields) {
     ({ gallery } = await updateGallery(id, body, { coverFile }));
+  }
+
+  if (hasDesign) {
+    ({ gallery } = await updateGalleryDesignSettings(
+      id,
+      galleryDesignInputToApiBody({
+        ...(input.coverFrame !== undefined
+          ? { coverFrame: normalizeGalleryCoverFrame(input.coverFrame) }
+          : {}),
+        ...(input.coverColor !== undefined ? { coverColor: input.coverColor } : {}),
+        ...(input.imageLayout !== undefined
+          ? { imageLayout: normalizeGalleryImageLayout(input.imageLayout) }
+          : {}),
+        ...(input.titleFont !== undefined ? { titleFont: input.titleFont } : {}),
+        ...(input.bodyFont !== undefined ? { bodyFont: input.bodyFont } : {}),
+      }),
+    ));
   }
 
   if (hasFocal) {
@@ -405,22 +538,7 @@ export async function updateFolder(id: string, input: UpdateFolderInput): Promis
     return getFolder(id);
   }
 
-  if (input.coverFrame !== undefined || input.coverColor !== undefined) {
-    patchFolderOverride(id, {
-      ...(input.coverFrame !== undefined
-        ? { coverFrame: normalizeGalleryCoverFrame(input.coverFrame) }
-        : {}),
-      ...(input.coverColor !== undefined ? { coverColor: input.coverColor } : {}),
-    });
-  }
-
-  return {
-    ...mapGalleryToApiFolder(gallery),
-    ...(input.coverFrame !== undefined
-      ? { coverFrame: normalizeGalleryCoverFrame(input.coverFrame) }
-      : {}),
-    ...(input.coverColor !== undefined ? { coverColor: input.coverColor } : {}),
-  };
+  return reloadFolderAfterGalleryPatch(id);
 }
 
 export async function deleteFolder(id: string): Promise<FolderMoveToTrashResult> {
@@ -438,13 +556,13 @@ export async function deleteFolder(id: string): Promise<FolderMoveToTrashResult>
 }
 
 export async function uploadFolderBackgroundMusic(folderId: string, file: File): Promise<ApiFolder> {
-  const { gallery } = await uploadGalleryBackgroundMusic(folderId, file);
-  return mapGalleryToApiFolder(gallery);
+  await uploadGalleryBackgroundMusic(folderId, file);
+  return reloadFolderAfterGalleryPatch(folderId);
 }
 
 export async function deleteFolderBackgroundMusic(folderId: string): Promise<ApiFolder> {
-  const { gallery } = await deleteGalleryBackgroundMusic(folderId);
-  return mapGalleryToApiFolder(gallery);
+  await deleteGalleryBackgroundMusic(folderId);
+  return reloadFolderAfterGalleryPatch(folderId);
 }
 
 export async function getShareLinkExpiryPresets(): Promise<ShareLinkExpiryPreset[]> {
@@ -457,30 +575,159 @@ export async function patchFolderShare(
   input: {
     selectionLocked?: boolean;
     selectionLimit?: number | null;
+    finalDeliveryEnabled?: boolean;
     clearSelectionSubmit?: boolean;
   },
 ): Promise<ApiFolder> {
-  if (input.selectionLimit !== undefined) {
-    const n = input.selectionLimit;
-    const maxSelections = n == null || n === 0 ? null : Math.max(1, Math.floor(n));
-    const { gallery } = await updateGallerySelectionSettings(folderId, { maxSelections });
-    return mapGalleryToApiFolder(gallery);
+  const hasApiPatch =
+    input.selectionLimit !== undefined ||
+    input.selectionLocked !== undefined ||
+    input.finalDeliveryEnabled !== undefined;
+
+  if (hasApiPatch && !isLocalDemoFolderId(folderId)) {
+    const body: import("@/lib/galleries-api").GallerySelectionSettingsBody = {};
+    if (input.selectionLimit !== undefined) {
+      const n = input.selectionLimit;
+      body.maxSelections = n == null || n === 0 ? null : Math.max(1, Math.floor(n));
+    }
+    if (input.selectionLocked !== undefined) body.selectionLocked = input.selectionLocked;
+    if (input.finalDeliveryEnabled !== undefined) {
+      body.finalDeliveryEnabled = input.finalDeliveryEnabled;
+    }
+    await updateGallerySelectionSettings(folderId, body);
+    return reloadFolderAfterGalleryPatch(folderId);
   }
 
-  // Selection lock / clear-submit not yet on gallery API — keep demo fallback.
-  await delay();
-  if (input.selectionLocked !== undefined) {
-    patchFolderOverride(folderId, { selectionLocked: input.selectionLocked });
+  if (input.selectionLimit !== undefined && isLocalDemoFolderId(folderId)) {
+    const n = input.selectionLimit;
+    const maxSelections = n == null || n === 0 ? null : Math.max(1, Math.floor(n));
+    patchFolderOverride(folderId, { selectionLimit: maxSelections ?? undefined });
   }
-  if (input.clearSelectionSubmit) {
-    const p = loadProjectById(folderId);
-    if (p) {
-      saveProjectSnapshot({ ...p, selectionSubmitted: false });
+
+  if (isLocalDemoFolderId(folderId)) {
+    await delay();
+    if (input.selectionLocked !== undefined) {
+      patchFolderOverride(folderId, { selectionLocked: input.selectionLocked });
     }
+    if (input.clearSelectionSubmit) {
+      const p = loadProjectById(folderId);
+      if (p) {
+        saveProjectSnapshot({ ...p, selectionSubmitted: false });
+      }
+    }
+    const f = getDemoFolderApiModel(folderId);
+    if (!f) throw new FoldersApiError("Gallery not found.", 404, null);
+    return f;
   }
-  const f = getDemoFolderApiModel(folderId);
-  if (!f) throw new FoldersApiError("Gallery not found.", 404, null);
-  return f;
+
+  return getFolder(folderId);
+}
+
+export async function patchFolderUploadSettings(
+  folderId: string,
+  input: { watermarkPreviewEnabled: boolean },
+): Promise<ApiFolder> {
+  if (isLocalDemoFolderId(folderId)) {
+    await delay();
+    patchFolderOverride(folderId, { watermarkPreviewEnabled: input.watermarkPreviewEnabled });
+    const f = getDemoFolderApiModel(folderId);
+    if (!f) throw new FoldersApiError("Gallery not found.", 404, null);
+    return { ...f, watermarkPreviewEnabled: input.watermarkPreviewEnabled };
+  }
+  await updateGalleryUploadSettings(folderId, input);
+  return reloadFolderAfterGalleryPatch(folderId);
+}
+
+export async function patchFolderFinalSettings(
+  folderId: string,
+  input: { watermarkFinalsEnabled: boolean },
+): Promise<ApiFolder> {
+  if (isLocalDemoFolderId(folderId)) {
+    await delay();
+    patchFolderOverride(folderId, { watermarkFinalsEnabled: input.watermarkFinalsEnabled });
+    const f = getDemoFolderApiModel(folderId);
+    if (!f) throw new FoldersApiError("Gallery not found.", 404, null);
+    return { ...f, watermarkFinalsEnabled: input.watermarkFinalsEnabled };
+  }
+  await updateGalleryFinalSettings(folderId, input);
+  return reloadFolderAfterGalleryPatch(folderId);
+}
+
+export async function patchFolderDesignSettings(
+  folderId: string,
+  input: import("@/lib/galleries-api").GalleryDesignSettingsInput,
+): Promise<ApiFolder> {
+  if (isLocalDemoFolderId(folderId)) {
+    await delay();
+    patchFolderOverride(folderId, {
+      ...(input.coverFrame !== undefined
+        ? { coverFrame: normalizeGalleryCoverFrame(input.coverFrame) }
+        : {}),
+      ...(input.coverColor !== undefined ? { coverColor: input.coverColor } : {}),
+      ...(input.coverTextColor !== undefined ? { coverTextColor: input.coverTextColor } : {}),
+      ...(input.coverButtonColor !== undefined ? { coverButtonColor: input.coverButtonColor } : {}),
+      ...(input.imageLayout !== undefined
+        ? { imageLayout: normalizeGalleryImageLayout(input.imageLayout) }
+        : {}),
+    });
+    const f = getDemoFolderApiModel(folderId);
+    if (!f) throw new FoldersApiError("Gallery not found.", 404, null);
+    return {
+      ...f,
+      ...(input.coverFrame !== undefined
+        ? { coverFrame: normalizeGalleryCoverFrame(input.coverFrame) }
+        : {}),
+      ...(input.coverColor !== undefined ? { coverColor: input.coverColor } : {}),
+      ...(input.coverTextColor !== undefined ? { coverTextColor: input.coverTextColor } : {}),
+      ...(input.coverButtonColor !== undefined ? { coverButtonColor: input.coverButtonColor } : {}),
+      ...(input.imageLayout !== undefined
+        ? { imageLayout: normalizeGalleryImageLayout(input.imageLayout) }
+        : {}),
+      ...(input.titleFont !== undefined ? { titleFont: input.titleFont.trim() } : {}),
+      ...(input.bodyFont !== undefined ? { bodyFont: input.bodyFont.trim() } : {}),
+    };
+  }
+
+  await updateGalleryDesignSettings(
+    folderId,
+    galleryDesignInputToApiBody(input),
+  );
+  return reloadFolderAfterGalleryPatch(folderId);
+}
+
+export async function patchFolderClientAccess(
+  folderId: string,
+  input: {
+    passwordProtected?: boolean;
+    password?: string;
+    allowDownloads?: boolean;
+  },
+): Promise<ApiFolder> {
+  if (isLocalDemoFolderId(folderId)) {
+    await delay();
+    patchFolderOverride(folderId, {
+      ...(input.passwordProtected !== undefined
+        ? { sharePasswordEnabled: input.passwordProtected }
+        : {}),
+      ...(input.password?.trim() ? { shareAccessPin: input.password.trim() } : {}),
+    });
+    const f = getDemoFolderApiModel(folderId);
+    if (!f) throw new FoldersApiError("Gallery not found.", 404, null);
+    return {
+      ...f,
+      ...(input.passwordProtected !== undefined
+        ? { sharePasswordEnabled: input.passwordProtected }
+        : {}),
+      ...(input.allowDownloads !== undefined ? { allowDownloads: input.allowDownloads } : {}),
+    };
+  }
+
+  const body: import("@/lib/galleries-api").GalleryClientAccessBody = {};
+  if (input.passwordProtected !== undefined) body.passwordProtected = input.passwordProtected;
+  if (input.password !== undefined) body.password = input.password;
+  if (input.allowDownloads !== undefined) body.allowDownloads = input.allowDownloads;
+  await updateGalleryClientAccess(folderId, body);
+  return reloadFolderAfterGalleryPatch(folderId);
 }
 
 export async function postFolderMediaDuplicatePreview(
@@ -503,19 +750,50 @@ export async function postFolderMediaDuplicatePreview(
   return names.length ? { hasConflicts: true, conflictingFilenames: names } : { hasConflicts: false };
 }
 
+export type RegenerateFolderShareResult = {
+  folder: ApiFolder;
+  smsError?: { message?: string };
+};
+
 export async function regenerateFolderShare(
   folderId: string,
-  input: { clearSlug?: boolean; linkExpiry?: string },
-): Promise<ApiFolder> {
+  input: { clearSlug?: boolean; linkExpiry?: string; notifyClientViaSms?: boolean; message?: string },
+): Promise<RegenerateFolderShareResult> {
   void input.clearSlug;
   void input.linkExpiry;
-  const { gallery } = await activateGalleryShareLink(folderId);
-  return mapGalleryToApiFolder(gallery);
+  if (isLocalDemoFolderId(folderId)) {
+    patchFolderOverride(folderId, {
+      shareEnabled: true,
+      shareSharedAt: new Date().toISOString(),
+    });
+    const folder = await getFolder(folderId);
+    if (!folder) {
+      throw new FoldersApiError("Folder not found.", 404, null);
+    }
+    return { folder };
+  }
+  const res = await activateGalleryShareLink(folderId, {
+    notifyClientViaSms: input.notifyClientViaSms,
+    message: input.message,
+  });
+  const folder = await reloadFolderAfterGalleryPatch(folderId);
+  return {
+    folder,
+    ...(res.smsError ? { smsError: res.smsError } : {}),
+  };
 }
 
 export async function revokeFolderShare(folderId: string): Promise<ApiFolder> {
-  const { gallery } = await revokeGalleryShareLink(folderId);
-  return mapGalleryToApiFolder(gallery);
+  if (isLocalDemoFolderId(folderId)) {
+    patchFolderOverride(folderId, { shareEnabled: false });
+    const folder = await getFolder(folderId);
+    if (!folder) {
+      throw new FoldersApiError("Folder not found.", 404, null);
+    }
+    return folder;
+  }
+  await revokeGalleryShareLink(folderId);
+  return reloadFolderAfterGalleryPatch(folderId);
 }
 
 export type UploadFolderMediaFormOptions = {
@@ -523,6 +801,8 @@ export type UploadFolderMediaFormOptions = {
   markUploadComplete?: boolean;
   /** Target gallery set id; omit to leave set unchanged on replace. */
   setId?: string | null;
+  /** When true, backend should generate watermarked preview derivatives for raw uploads. */
+  applyPreviewWatermark?: boolean;
 };
 
 export type FinalDeliveryUploadFields = {
@@ -534,6 +814,8 @@ export type FinalDeliveryUploadFields = {
 export type UploadFolderFinalMediaFormOptions = UploadFolderMediaFormOptions &
   Partial<FinalDeliveryUploadFields> & {
     selectionMediaId?: string;
+    /** When true, backend should apply the brand watermark to uploaded finals. */
+    applyWatermark?: boolean;
   };
 
 export type UploadFolderMediaResult = {
@@ -565,6 +847,7 @@ export async function uploadFolderRawMedia(
   const result = await uploadGalleryPhotos(folderId, files, {
     onConflict: formOptions?.duplicateAction,
     setId: formOptions?.setId,
+    applyPreviewWatermark: formOptions?.applyPreviewWatermark,
     onProgress: (loaded, total, lengthComputable, batch) => {
       onProgress?.(loaded, total, lengthComputable, batch);
     },
@@ -598,6 +881,7 @@ export async function uploadFolderFinalMedia(
     outstandingBalanceGhs: formOptions?.amountRemainingGHS,
     lockPreviews: formOptions?.lockImagesBeforeUpload,
     setId: formOptions?.setId,
+    applyWatermark: formOptions?.applyWatermark,
     onProgress: (loaded, total, lengthComputable, batch) => {
       onProgress?.(loaded, total, lengthComputable, batch);
     },
@@ -679,14 +963,38 @@ export async function deleteAllFolderFinalMedia(folderId: string): Promise<BulkM
   };
 }
 
+export async function reorderFolderRawMedia(
+  folderId: string,
+  orderedIds: string[],
+): Promise<ApiFolder> {
+  if (isLocalDemoFolderId(folderId)) {
+    reorderDemoProjectRawMedia(folderId, orderedIds);
+    return getFolder(folderId);
+  }
+  await reorderGalleryUploads(folderId, orderedIds);
+  return getFolder(folderId);
+}
+
+export async function reorderFolderFinalMedia(
+  folderId: string,
+  orderedIds: string[],
+): Promise<ApiFolder> {
+  if (isLocalDemoFolderId(folderId)) {
+    reorderDemoProjectFinalMedia(folderId, orderedIds);
+    return getFolder(folderId);
+  }
+  await reorderGalleryFinals(folderId, orderedIds);
+  return getFolder(folderId);
+}
+
 export async function patchFolderStatus(folderId: string, status: string): Promise<ApiFolder> {
   const normalized = uiStatusToGalleryStatus(status);
   if (normalized === "done") {
-    const { gallery } = await completeGallery(folderId);
-    return mapGalleryToApiFolder(gallery);
+    await completeGallery(folderId);
+  } else {
+    await updateGallery(folderId, { status: normalized });
   }
-  const { gallery } = await updateGallery(folderId, { status: normalized });
-  return mapGalleryToApiFolder(gallery);
+  return reloadFolderAfterGalleryPatch(folderId);
 }
 
 export async function patchFolderSelectionFeedbackReply(

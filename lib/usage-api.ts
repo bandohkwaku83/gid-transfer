@@ -1,5 +1,11 @@
+import { getAuthToken } from "@/lib/auth-demo";
 import { loadAllProjects } from "@/lib/demo-data";
 import { HttpError } from "@/lib/http";
+import {
+  fetchStorage,
+  type StorageGalleryRow,
+  type StorageResponse,
+} from "@/lib/storage-api";
 
 export type UsageCategoryBreakdown = {
   bytes: number;
@@ -79,7 +85,47 @@ export function computeDemoStorageTotalBytes(): number {
   return raws + sel + finals;
 }
 
+function mapStorageSummary(res: StorageResponse): UsageSummaryResponse {
+  const { summary } = res;
+  const raws = summary.breakdown.rawsBytes;
+  const selections = summary.breakdown.selectionsBytes;
+  const finals = summary.breakdown.finalsBytes;
+  const total = summary.usedBytes;
+  const pct = (part: number) => (total > 0 ? Math.round((part / total) * 1000) / 10 : 0);
+  return {
+    total_storage_bytes: total,
+    raws_size_bytes: raws,
+    selections_size_bytes: selections,
+    finals_size_bytes: finals,
+    by_category: {
+      raws: { bytes: raws, percent_of_total: pct(raws) },
+      selections: { bytes: selections, percent_of_total: pct(selections) },
+      finals: { bytes: finals, percent_of_total: pct(finals) },
+    },
+  };
+}
+
+function mapStorageGalleryRow(g: StorageGalleryRow): UsageGalleryRow {
+  return {
+    id: g.id,
+    name: g.name,
+    client: {
+      id: g.clientId ?? `virtual-${g.id}`,
+      name: g.clientName?.trim() || "N/A",
+    },
+    raws_size_bytes: g.rawsBytes,
+    selections_size_bytes: g.selectionsBytes,
+    finals_size_bytes: g.finalsBytes,
+    total_size_bytes: g.totalBytes,
+  };
+}
+
 export async function fetchUsageSummary(): Promise<UsageSummaryResponse> {
+  if (getAuthToken()) {
+    const res = await fetchStorage({ sort: "size", order: "desc" });
+    return mapStorageSummary(res);
+  }
+
   await delay();
   const projects = loadAllProjects();
   let raws = 0;
@@ -115,6 +161,22 @@ export async function fetchUsageGalleries(params: {
   order: "asc" | "desc";
   signal?: AbortSignal;
 }): Promise<UsageGalleriesResponse> {
+  if (getAuthToken()) {
+    const sort = params.sortBy === "name" ? "name" : "size";
+    const res = await fetchStorage({
+      sort,
+      order: params.order,
+      signal: params.signal,
+    });
+    const galleries = res.galleries.map(mapStorageGalleryRow);
+    return {
+      count: galleries.length,
+      sort_by: params.sortBy,
+      order: params.order,
+      galleries,
+    };
+  }
+
   await delay();
   void params.signal;
   const projects = loadAllProjects();

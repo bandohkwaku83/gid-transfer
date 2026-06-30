@@ -1,28 +1,52 @@
 import { apiUrl } from "@/lib/api";
-import type { AuthUser } from "@/lib/auth-demo";
+import type { AuthProvider, AuthUser } from "@/lib/auth-demo";
 import {
+  authHandoffPayload,
   cacheOnboardingProfile,
+  clearAuth,
+  clearOnboardingProfileCache,
+  getAuth,
+  getAuthToken,
   hydrateAuthUser,
   setAuthSession,
 } from "@/lib/auth-demo";
-import { extractMessage, HttpError, parseJson } from "@/lib/http";
+import { authedJson, extractMessage, HttpError, parseJson } from "@/lib/http";
+import {
+  studioSmsFieldsFromApi,
+  type StudioSmsFields,
+} from "@/lib/sms-sender";
+import {
+  photographerAuthUrl,
+  redirectToTenantHostIfNeeded,
+} from "@/lib/studio-url";
 
 export class AuthApiError extends HttpError {}
+
+export { EmailNotVerifiedError } from "@/lib/http";
 
 export type ApiAuthUser = {
   _id: string;
   email: string;
-  authProvider?: string;
+  emailVerified?: boolean;
+  emailVerifiedAt?: string | null;
+  authProvider?: AuthProvider;
   createdAt?: string;
   updatedAt?: string;
   onboardingComplete?: boolean;
   studio?: {
     companyName?: string;
+    companySlug?: string;
     phone?: string;
+    country?: string;
     logoDataUrl?: string;
     logoUrl?: string;
     logoSrc?: string;
-  };
+    studioUrl?: string;
+    studioUrlSuffix?: string;
+    primaryDeliverable?: string;
+    primaryDeliver?: string;
+    referralCode?: string;
+  } & Partial<StudioSmsFields>;
 };
 
 export type AuthResponse = {
@@ -30,51 +54,172 @@ export type AuthResponse = {
   token: string;
   user: ApiAuthUser;
   isNewUser?: boolean;
+  requiresEmailVerification?: boolean;
 };
 
 export type MessageResponse = {
   message: string;
 };
 
+export type ResendVerificationResponse = MessageResponse & {
+  resendAfterSeconds: number;
+};
+
+/** True when an email/password account still needs OTP verification. */
+export function userNeedsEmailVerification(user: {
+  emailVerified?: boolean;
+  authProvider?: string;
+}): boolean {
+  if (user.authProvider && user.authProvider !== "email") return false;
+  return user.emailVerified === false;
+}
+
+export function verifyEmailPath(): string {
+  return "/verify-email";
+}
+
 function nameFromEmail(email: string) {
   const localPart = email.split("@")[0]?.trim() || "User";
   return localPart.replace(/[._-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-/** Save JWT + user from register, login, Google, or reset-password. */
+/** Save JWT + user from register, login, Google, verify-email, or reset-password. */
 export function persistAuthResponse(res: AuthResponse): AuthUser {
   const token = res.token?.trim();
   if (!token) {
     throw new Error("Login succeeded but no token was returned. Check the API URL.");
   }
-  const user = mapApiUserToAuthUser(res.user);
+  const prior = getAuth()?.user;
+  const mergedApiUser: ApiAuthUser = {
+    _id: res.user._id?.trim() || prior?._id || "",
+    email: res.user.email?.trim() || prior?.email || "",
+    onboardingComplete: res.user.onboardingComplete ?? prior?.onboardingComplete,
+    createdAt: res.user.createdAt ?? prior?.createdAt,
+    updatedAt: res.user.updatedAt ?? prior?.updatedAt,
+    emailVerified: res.user.emailVerified ?? prior?.emailVerified,
+    emailVerifiedAt:
+      res.user.emailVerifiedAt !== undefined ? res.user.emailVerifiedAt : prior?.emailVerifiedAt,
+    authProvider: res.user.authProvider ?? prior?.authProvider,
+    studio: res.user.studio ?? (prior?.studio ? { ...prior.studio } : undefined),
+  };
+  const user = mapApiUserToAuthUser(mergedApiUser);
   setAuthSession({
     email: user.email,
     token,
     user,
   });
   if (user.onboardingComplete && user.studio) {
-    cacheOnboardingProfile(user.email, user.studio);
+    cacheOnboardingProfile(user, user.studio);
+  } else {
+    clearOnboardingProfileCache(user);
   }
   return user;
 }
 
 export function authRedirectPath(user: AuthUser): string {
+  if (userNeedsEmailVerification(user)) return verifyEmailPath();
   return user.onboardingComplete ? "/dashboard" : "/onboarding";
 }
 
-export function mapApiUserToAuthUser(user: ApiAuthUser): AuthUser {
+function studioHostOptionsFromUser(user: AuthUser) {
+  return {
+    studioUrl: user.studio?.studioUrl,
+    studioUrlSuffix: user.studio?.studioUrlSuffix,
+  };
+}
+
+/**
+ * After sign-in or onboarding:
+ * - Setup → apex `/onboarding` (studio slug unknown to the URL until they finish)
+ * - Done → `{slug}.localhost` `/dashboard` only
+ */
+/** @returns Whether navigation away from the current auth/onboarding screen was started. */
+export function navigateAfterAuth(
+  user: AuthUser,
+  router: { replace: (path: string) => void },
+): boolean {
+  if (userNeedsEmailVerification(user)) {
+    const verifyUrl = photographerAuthUrl(verifyEmailPath());
+    if (
+      typeof window !== "undefined" &&
+      window.location.origin !== new URL(verifyUrl).origin
+    ) {
+      window.location.replace(verifyUrl);
+      return true;
+    }
+    router.replace(verifyEmailPath());
+    return false;
+  }
+
+  if (!user.onboardingComplete) {
+    const apexOnboarding = photographerAuthUrl("/onboarding");
+    if (
+      typeof window !== "undefined" &&
+      window.location.origin !== new URL(apexOnboarding).origin
+    ) {
+      window.location.replace(apexOnboarding);
+      return true;
+    }
+    router.replace("/onboarding");
+    return false;
+  }
+
+  const slug = user.studio?.companySlug?.trim();
+  if (
+    slug &&
+    redirectToTenantHostIfNeeded(
+      slug,
+      "/dashboard",
+      studioHostOptionsFromUser(user),
+      authHandoffPayload(),
+      clearAuth,
+    )
+  ) {
+    return true;
+  }
+  router.replace("/dashboard");
+  return true;
+}
+
+export function mapApiUserToAuthUser(
+  user: ApiAuthUser,
+  extras?: { studioUrl?: string | null; studioUrlSuffix?: string | null },
+): AuthUser {
   const email = user.email.trim();
   const studio = user.studio
     ? {
         companyName: user.studio.companyName ?? "",
+        ...(user.studio.companySlug?.trim()
+          ? { companySlug: user.studio.companySlug.trim() }
+          : {}),
         ...(user.studio.phone ? { phone: user.studio.phone } : {}),
+        ...(user.studio.studioUrl?.trim() || extras?.studioUrl?.trim()
+          ? {
+              studioUrl: user.studio.studioUrl?.trim() || extras?.studioUrl?.trim(),
+            }
+          : {}),
+        ...(user.studio.studioUrlSuffix?.trim() || extras?.studioUrlSuffix?.trim()
+          ? {
+              studioUrlSuffix:
+                user.studio.studioUrlSuffix?.trim() || extras?.studioUrlSuffix?.trim(),
+            }
+          : {}),
         ...(user.studio.logoSrc || user.studio.logoUrl || user.studio.logoDataUrl
           ? {
               logoDataUrl:
                 user.studio.logoSrc ?? user.studio.logoUrl ?? user.studio.logoDataUrl,
             }
           : {}),
+        ...(user.studio.country?.trim() ? { country: user.studio.country.trim() } : {}),
+        ...(() => {
+          const deliver =
+            user.studio.primaryDeliverable?.trim() || user.studio.primaryDeliver?.trim();
+          return deliver ? { primaryDeliver: deliver } : {};
+        })(),
+        ...(user.studio.referralCode?.trim()
+          ? { referralCode: user.studio.referralCode.trim() }
+          : {}),
+        ...studioSmsFieldsFromApi(user.studio),
       }
     : undefined;
   return hydrateAuthUser({
@@ -85,6 +230,9 @@ export function mapApiUserToAuthUser(user: ApiAuthUser): AuthUser {
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
     onboardingComplete: Boolean(user.onboardingComplete),
+    ...(user.emailVerified !== undefined ? { emailVerified: user.emailVerified } : {}),
+    ...(user.emailVerifiedAt !== undefined ? { emailVerifiedAt: user.emailVerifiedAt } : {}),
+    ...(user.authProvider ? { authProvider: user.authProvider } : {}),
     studio,
   });
 }
@@ -131,6 +279,43 @@ export async function registerWithEmail(
       body: JSON.stringify({ email, password, acceptedTerms }),
     },
     "Could not create account",
+  );
+}
+
+/** GET /api/auth/me — refresh session user from the server. */
+export async function fetchAuthMe(): Promise<{ user: ApiAuthUser }> {
+  return authedJson<{ user: ApiAuthUser }>(
+    "/api/auth/me",
+    { method: "GET" },
+    "Could not load account",
+    AuthApiError,
+    { redirectOn401: true },
+  );
+}
+
+/** POST /api/auth/verify-email — completes signup after the user enters the emailed OTP. */
+export async function verifyEmail(code: string): Promise<AuthResponse> {
+  const digits = code.replace(/\D/g, "").slice(0, 6);
+  return authedJson<AuthResponse>(
+    "/api/auth/verify-email",
+    {
+      method: "POST",
+      body: JSON.stringify({ code: digits }),
+    },
+    "Could not verify email",
+    AuthApiError,
+    { redirectOn401: true },
+  );
+}
+
+/** POST /api/auth/resend-verification — sends a fresh signup OTP. */
+export async function resendVerification(): Promise<ResendVerificationResponse> {
+  return authedJson<ResendVerificationResponse>(
+    "/api/auth/resend-verification",
+    { method: "POST" },
+    "Could not resend verification code",
+    AuthApiError,
+    { redirectOn401: true },
   );
 }
 
@@ -182,4 +367,23 @@ export async function resetPassword(
     },
     "Could not reset password",
   );
+}
+
+/**
+ * Invalidate the current JWT on the server (bumps tokenVersion).
+ * Uses raw fetch so a 401 does not trigger authedFetch's redirect loop.
+ * Network errors are ignored — callers should clear local auth regardless.
+ */
+export async function logoutSession(): Promise<void> {
+  const token = getAuthToken()?.trim();
+  if (!token) return;
+
+  try {
+    await fetch(apiUrl("/api/auth/signout"), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    // offline / unreachable — local sign-out still proceeds
+  }
 }

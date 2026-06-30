@@ -1,5 +1,7 @@
 export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "";
+  process.env.API_PUBLIC_URL?.replace(/\/$/, "") ??
+  process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ??
+  "";
 
 function uploadsProxyHostSet(): Set<string> {
   const set = new Set<string>(["api.gidophotography.com"]);
@@ -10,7 +12,25 @@ function uploadsProxyHostSet(): Set<string> {
       if (t) set.add(t);
     }
   }
+  // Local backend URLs from API_PUBLIC_URL resolveMediaUrl responses.
+  set.add("127.0.0.1");
+  set.add("localhost");
   return set;
+}
+
+/** Map private S3 object URLs to same-origin `/uploads/...` (backend streams from S3). */
+function s3GalleryMediaToUploadsPath(url: string): string | null {
+  try {
+    const parsed = new URL(url.trim());
+    if (!parsed.hostname.includes("amazonaws.com")) return null;
+    const match = parsed.pathname.match(
+      /^\/(gallery-photos|gallery-finals)\/([^/]+)\/([^/]+)$/,
+    );
+    if (!match) return null;
+    return `/uploads/${match[1]}/${match[2]}/${match[3]}${parsed.search}`;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -23,6 +43,10 @@ export function sameOriginUploadsUrl(url: string): string {
   if (!raw) return raw;
   if (raw.startsWith("/uploads/")) return raw;
   if (raw === "/uploads") return raw;
+
+  const fromS3 = s3GalleryMediaToUploadsPath(raw);
+  if (fromS3) return fromS3;
+
   const noProto = raw.replace(/^\.?\/*/, "");
   if (/^uploads\//i.test(noProto) && !raw.includes("://")) {
     return `/${noProto}`;

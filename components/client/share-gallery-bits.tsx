@@ -45,15 +45,40 @@ export {
   uploadItemClass,
 };
 
-/* ----------------------------- next/image hints ----------------------------- */
-
-export const SHARE_GRID_IMAGE_QUALITY = 78;
-export const SHARE_LIGHTBOX_IMAGE_QUALITY = 82;
+/* ----------------------------- image display ----------------------------- */
 
 /** `sizes` for selected-photo strip (4–10 columns). */
 export const SELECTED_STRIP_IMAGE_SIZES = "(max-width: 640px) 25vw, (max-width: 900px) 12vw, 120px";
 
 export const SHARE_LIGHTBOX_SIZES = "(max-width: 1280px) 100vw, 896px";
+
+export const SHARE_GALLERY_INITIAL_VISIBLE = 60;
+export const SHARE_GALLERY_LOAD_MORE_COUNT = 40;
+
+export function GalleryViewMoreButton({
+  onClick,
+  remainingCount,
+}: {
+  onClick: () => void;
+  remainingCount: number;
+}) {
+  return (
+    <div className="mt-8 flex justify-center">
+      <button
+        type="button"
+        onClick={onClick}
+        className="inline-flex items-center justify-center rounded-full border border-zinc-200 bg-white px-6 py-2.5 text-sm font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
+      >
+        View more
+        {remainingCount > 0 ? (
+          <span className="ml-2 tabular-nums text-zinc-500 dark:text-zinc-400">
+            ({remainingCount} left)
+          </span>
+        ) : null}
+      </button>
+    </div>
+  );
+}
 
 export function isClientAssetVideo(asset: Pick<DemoAsset, "isVideo" | "originalName" | "previewUrl" | "thumbUrl">): boolean {
   if (asset.isVideo) return true;
@@ -93,6 +118,8 @@ export function toDemoAssets(shareAssets: ShareGalleryAsset[]): DemoAsset[] {
     photographerReply: a.photographerReply ?? "",
     hasEdited: false,
     thumbUrl: a.thumbUrl,
+    ...(a.url ? { url: a.url } : {}),
+    ...(a.displayUrl ? { displayUrl: a.displayUrl } : {}),
     ...(a.previewUrl ? { previewUrl: a.previewUrl } : {}),
     ...(a.isVideo ? { isVideo: true } : {}),
   }));

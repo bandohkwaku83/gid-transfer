@@ -4,13 +4,15 @@ import Image from "next/image";
 import Link from "next/link";
 import { AuthFormPasswordInput } from "@/components/ui/form-input";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { redirectToApexAuthIfNeeded } from "@/lib/studio-url";
 import {
   AuthApiError,
-  authRedirectPath,
+  navigateAfterAuth,
   persistAuthResponse,
   resetPassword,
 } from "@/lib/auth-api";
+import { APP_NAME } from "@/lib/branding";
 import { cn } from "@/lib/utils";
 
 function ResetPasswordForm() {
@@ -22,6 +24,10 @@ function ResetPasswordForm() {
   const [confirm, setConfirm] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    redirectToApexAuthIfNeeded("/reset-password");
+  }, []);
 
   function authErrorMessage(err: unknown, fallback: string) {
     if (err instanceof AuthApiError) return err.message;
@@ -50,7 +56,7 @@ function ResetPasswordForm() {
     try {
       const res = await resetPassword(token, password);
       const user = persistAuthResponse(res);
-      router.replace(authRedirectPath(user));
+      navigateAfterAuth(user, router);
     } catch (err) {
       setError(authErrorMessage(err, "Could not reset your password. Try again."));
     } finally {
@@ -76,10 +82,11 @@ function ResetPasswordForm() {
 
           <div className="mt-4 flex justify-center">
             <Image
-              src="/images/gido_logo.png"
-              alt="Gido logo"
-              width={120}
-              height={120}
+              src="/svgs/logo.svg"
+              alt={`${APP_NAME} logo`}
+              width={691}
+              height={801}
+              className="h-10 w-auto brightness-0"
             />
           </div>
 

@@ -1,5 +1,6 @@
 import { sameOriginUploadsUrl } from "@/lib/api";
-import { authedFormUpload, authedJson } from "@/lib/http";
+import { s3UploadGalleryFinals, s3UploadGalleryPhotos } from "@/lib/gallery-upload-s3";
+import { authedJson } from "@/lib/http";
 import type { ApiFolderMedia } from "@/lib/folders/types";
 import { FoldersApiError } from "@/lib/folders/types";
 import type { DuplicateUploadAction } from "@/lib/upload-preferences";
@@ -9,6 +10,10 @@ export type ApiGalleryPhoto = {
   galleryId?: string;
   originalFilename: string;
   url: string;
+  /** Unwatermarked thumbnail (`*-thumb.jpg`). */
+  thumbUrl?: string;
+  /** Watermarked client preview (`*-preview-wm.jpg`) when generated. */
+  displayUrl?: string;
   mimeType?: string;
   contentType?: string;
   sizeBytes?: number;
@@ -28,6 +33,8 @@ export type ApiGalleryPhoto = {
   createdAt?: string;
   updatedAt?: string;
   setId?: string | null;
+  /** False while thumbnails / watermarked previews are still processing. */
+  derivativesReady?: boolean;
 };
 
 export type GalleryUploadPhotosResult = {
@@ -43,6 +50,8 @@ export type GalleryMediaBundle = {
   selection: ApiFolderMedia[];
   finals: ApiFolderMedia[];
   flaggedFinals: ApiFolderMedia[];
+  selectionLocked?: boolean;
+  selectionSubmittedAt?: string | null;
 };
 
 function galleryPath(id: string) {
@@ -53,62 +62,10 @@ function duplicateActionToOnConflict(action?: DuplicateUploadAction): "skip" | "
   return action === "replace" ? "replace" : "skip";
 }
 
-/** Stay under Next.js dev/proxy default body buffer (~10MB) when many large raws ship in one pick. */
-const MAX_UPLOAD_BATCH_BYTES = 9 * 1024 * 1024;
-const MAX_UPLOAD_BATCH_FILES = 25;
-
 export type GalleryUploadBatchProgress = {
   fileIndex: number;
   fileCount: number;
 };
-
-function chunkFilesForGalleryUpload(files: File[]): File[][] {
-  if (files.length === 0) return [];
-  const batches: File[][] = [];
-  let current: File[] = [];
-  let bytes = 0;
-
-  for (const file of files) {
-    const wouldExceedBytes =
-      current.length > 0 && bytes + file.size > MAX_UPLOAD_BATCH_BYTES;
-    const wouldExceedCount = current.length >= MAX_UPLOAD_BATCH_FILES;
-    if (wouldExceedBytes || wouldExceedCount) {
-      batches.push(current);
-      current = [];
-      bytes = 0;
-    }
-    current.push(file);
-    bytes += file.size;
-  }
-  if (current.length) batches.push(current);
-  return batches;
-}
-
-function scaleBatchUploadProgress(
-  batches: File[][],
-  batchIndex: number,
-  loaded: number,
-  total: number,
-  lengthComputable: boolean,
-  onProgress?: (loaded: number, total: number, lengthComputable: boolean) => void,
-) {
-  if (!onProgress) return;
-  const batchBytes = batches[batchIndex]!.reduce((sum, f) => sum + f.size, 0);
-  const allBytes = batches.reduce(
-    (sum, batch) => sum + batch.reduce((n, f) => n + f.size, 0),
-    0,
-  );
-  const doneBytes = batches
-    .slice(0, batchIndex)
-    .reduce((sum, batch) => sum + batch.reduce((n, f) => n + f.size, 0), 0);
-  if (allBytes <= 0) {
-    onProgress(loaded, total, lengthComputable);
-    return;
-  }
-  const batchLoaded =
-    lengthComputable && total > 0 ? (loaded / total) * batchBytes : loaded;
-  onProgress(doneBytes + batchLoaded, allBytes, true);
-}
 
 function resolveMediaUrl(url?: string | null): string | undefined {
   if (!url?.trim()) return undefined;
@@ -117,12 +74,21 @@ function resolveMediaUrl(url?: string | null): string | undefined {
 
 export function galleryPhotoToApiFolderMedia(photo: ApiGalleryPhoto): ApiFolderMedia {
   const url = resolveMediaUrl(photo.url);
+  const displayUrl = resolveMediaUrl(photo.displayUrl);
+  const thumbUrl = resolveMediaUrl(photo.thumbUrl);
   const mimeType = photo.mimeType || photo.contentType || "";
   const isVideo =
     photo.isVideo === true ||
     mimeType.toLowerCase().startsWith("video/") ||
     /\.(mp4|mov|webm|m4v|avi|mkv|ogv)$/i.test(photo.originalFilename) ||
     /\.(mp4|mov|webm|m4v|avi|mkv|ogv)(?:[?#].*)?$/i.test(url ?? "");
+  const resolvedThumb = isVideo ? undefined : thumbUrl;
+  const previewUrl =
+    isVideo
+      ? url
+      : displayUrl && resolvedThumb && displayUrl !== resolvedThumb
+        ? displayUrl
+        : undefined;
   return {
     _id: photo.id,
     id: photo.id,
@@ -131,8 +97,9 @@ export function galleryPhotoToApiFolderMedia(photo: ApiGalleryPhoto): ApiFolderM
     filename: photo.originalFilename,
     name: photo.originalFilename,
     url,
-    thumbUrl: isVideo ? undefined : url,
-    previewUrl: url,
+    ...(displayUrl ? { displayUrl } : {}),
+    thumbUrl: resolvedThumb,
+    ...(previewUrl ? { previewUrl } : {}),
     mimeType,
     isVideo,
     selected: photo.selectedByClient === true,
@@ -146,7 +113,116 @@ export function galleryPhotoToApiFolderMedia(photo: ApiGalleryPhoto): ApiFolderM
     flaggedAt: photo.flaggedAt ?? null,
     locked: photo.locked === true || photo.isLocked === true,
     setId: photo.setId ?? null,
+    derivativesReady: photo.derivativesReady,
   };
+}
+
+/** Photographer dashboard grid — prefer thumb, fall back to full image while processing. */
+export function folderUploadGridSrc(
+  media: Pick<ApiFolderMedia, "thumbUrl" | "url" | "thumbnailUrl">,
+): string {
+  const thumb = (media.thumbUrl || media.thumbnailUrl || "").trim();
+  const full = (media.url || "").trim();
+  return thumb || full;
+}
+
+function galleryPhotoDerivativesPending(photo: ApiGalleryPhoto): boolean {
+  if (photo.derivativesReady === false) return true;
+  const mime = (photo.mimeType || photo.contentType || "").toLowerCase();
+  if (photo.isVideo === true || mime.startsWith("video/")) return false;
+  return false;
+}
+
+export function galleryPhotosPendingDerivatives(photos: ApiGalleryPhoto[]): string[] {
+  return photos.filter(galleryPhotoDerivativesPending).map((p) => p.id);
+}
+
+export function upsertGalleryUploadRows(
+  existing: ApiFolderMedia[],
+  incoming: ApiFolderMedia[],
+): ApiFolderMedia[] {
+  if (incoming.length === 0) return existing;
+  const byId = new Map<string, ApiFolderMedia>();
+  for (const row of existing) {
+    const id = row.id ?? row._id;
+    if (id) byId.set(String(id), row);
+  }
+  for (const row of incoming) {
+    const id = row.id ?? row._id;
+    if (id) byId.set(String(id), row);
+  }
+  const incomingIds = new Set(
+    incoming.map((row) => String(row.id ?? row._id ?? "")).filter(Boolean),
+  );
+  const next: ApiFolderMedia[] = [];
+  const seen = new Set<string>();
+  for (const row of existing) {
+    const id = String(row.id ?? row._id ?? "");
+    if (!id || !byId.has(id)) continue;
+    next.push(byId.get(id)!);
+    seen.add(id);
+  }
+  for (const row of incoming) {
+    const id = String(row.id ?? row._id ?? "");
+    if (!id || seen.has(id)) continue;
+    next.push(byId.get(id)!);
+    seen.add(id);
+  }
+  return next;
+}
+
+const DERIVATIVES_POLL_MS = 2000;
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Poll GET /uploads until listed photos report derivativesReady. */
+export async function pollGalleryUploadDerivatives(
+  galleryId: string,
+  photoIds: string[],
+  onPhotoReady: (photo: ApiGalleryPhoto) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const pending = new Set(photoIds.filter(Boolean));
+  if (pending.size === 0) return;
+
+  while (pending.size > 0) {
+    if (signal?.aborted) return;
+    try {
+      await sleep(DERIVATIVES_POLL_MS, signal);
+    } catch {
+      return;
+    }
+    if (signal?.aborted) return;
+    const res = await authedJson<{ photos?: ApiGalleryPhoto[] }>(
+      `${galleryPath(galleryId)}/uploads`,
+      { method: "GET" },
+      "Failed to refresh uploads",
+      FoldersApiError,
+    );
+    const photos = normalizePhotoList(res, ["photos"]);
+    for (const photo of photos) {
+      if (!pending.has(photo.id)) continue;
+      if (photo.derivativesReady !== true) continue;
+      pending.delete(photo.id);
+      onPhotoReady(photo);
+    }
+  }
 }
 
 function normalizePhotoList(body: unknown, keys: string[]): ApiGalleryPhoto[] {
@@ -233,13 +309,39 @@ export async function listGalleryUploads(galleryId: string): Promise<ApiFolderMe
 }
 
 export async function listGallerySelections(galleryId: string): Promise<ApiFolderMedia[]> {
-  const res = await authedJson<unknown>(
+  const bundle = await fetchGallerySelections(galleryId);
+  return bundle.photos;
+}
+
+type GallerySelectionsResponse = {
+  selectionSubmittedAt?: string | null;
+  selectionLocked?: boolean;
+  photos?: ApiGalleryPhoto[];
+  flaggedFinals?: ApiGalleryPhoto[];
+};
+
+export async function fetchGallerySelections(galleryId: string): Promise<{
+  photos: ApiFolderMedia[];
+  flaggedFinals: ApiFolderMedia[];
+  selectionLocked?: boolean;
+  selectionSubmittedAt?: string | null;
+}> {
+  const res = await authedJson<GallerySelectionsResponse>(
     `${galleryPath(galleryId)}/selections`,
     { method: "GET" },
     "Failed to load selections",
     FoldersApiError,
   );
-  return normalizeSelectionList(res).map(galleryPhotoToApiFolderMedia);
+  const photos = normalizeSelectionList(res).map(galleryPhotoToApiFolderMedia);
+  const flaggedFromResponse = normalizePhotoList(res, ["flaggedFinals"]).map(
+    galleryPhotoToApiFolderMedia,
+  );
+  return {
+    photos,
+    flaggedFinals: flaggedFromResponse,
+    selectionLocked: res.selectionLocked === true,
+    selectionSubmittedAt: res.selectionSubmittedAt ?? null,
+  };
 }
 
 export async function listGalleryFinals(galleryId: string): Promise<ApiFolderMedia[]> {
@@ -265,13 +367,24 @@ export async function listGalleryFlaggedFinals(galleryId: string): Promise<ApiFo
 }
 
 export async function fetchGalleryMedia(galleryId: string): Promise<GalleryMediaBundle> {
-  const [uploads, selection, finals, flaggedFinals] = await Promise.all([
+  const [uploads, selectionBundle, finals, flaggedFromEndpoint] = await Promise.all([
     listGalleryUploads(galleryId),
-    listGallerySelections(galleryId),
+    fetchGallerySelections(galleryId),
     listGalleryFinals(galleryId),
-    listGalleryFlaggedFinals(galleryId),
+    listGalleryFlaggedFinals(galleryId).catch(() => [] as ApiFolderMedia[]),
   ]);
-  return { uploads, selection, finals, flaggedFinals };
+
+  const flaggedFinals =
+    flaggedFromEndpoint.length > 0 ? flaggedFromEndpoint : selectionBundle.flaggedFinals;
+
+  return {
+    uploads,
+    selection: selectionBundle.photos,
+    finals,
+    flaggedFinals,
+    selectionLocked: selectionBundle.selectionLocked,
+    selectionSubmittedAt: selectionBundle.selectionSubmittedAt,
+  };
 }
 
 export async function uploadGalleryPhotos(
@@ -280,6 +393,7 @@ export async function uploadGalleryPhotos(
   options?: {
     onConflict?: DuplicateUploadAction;
     setId?: string | null;
+    applyPreviewWatermark?: boolean;
     onProgress?: (
       loaded: number,
       total: number,
@@ -292,61 +406,14 @@ export async function uploadGalleryPhotos(
     return { ignoredDuplicatesCount: 0, skipped: [], created: [], replaced: [] };
   }
 
-  const batches = chunkFilesForGalleryUpload(files);
-  const merged: GalleryUploadPhotosResult = {
-    created: [],
-    replaced: [],
-    skipped: [],
-  };
-  let ignoredDuplicatesCount = 0;
-  let filesCompleted = 0;
+  const merged = await s3UploadGalleryPhotos(galleryId, files, {
+    onConflict: duplicateActionToOnConflict(options?.onConflict),
+    setId: options?.setId,
+    applyPreviewWatermark: options?.applyPreviewWatermark,
+    onProgress: options?.onProgress,
+  });
 
-  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-    const batch = batches[batchIndex]!;
-    const form = new FormData();
-    for (const file of batch) {
-      form.append("photos", file);
-    }
-    form.append("onConflict", duplicateActionToOnConflict(options?.onConflict));
-    if (options?.setId !== undefined) {
-      form.append("setId", options.setId === null ? "unsorted" : options.setId);
-    }
-
-    const res = await authedFormUpload<GalleryUploadPhotosResult>(
-      `${galleryPath(galleryId)}/uploads`,
-      form,
-      {
-        fallbackError: "Failed to upload photos",
-        ErrorCtor: FoldersApiError,
-        onUploadProgress: (loaded, total, lengthComputable) => {
-          scaleBatchUploadProgress(
-            batches,
-            batchIndex,
-            loaded,
-            total,
-            lengthComputable,
-            (l, t, c) => {
-              options?.onProgress?.(l, t, c, {
-                fileIndex: Math.min(files.length, filesCompleted + 1),
-                fileCount: files.length,
-              });
-            },
-          );
-        },
-      },
-    );
-
-    if (Array.isArray(res.created)) merged.created!.push(...res.created);
-    if (Array.isArray(res.replaced)) merged.replaced!.push(...res.replaced);
-    if (Array.isArray(res.skipped)) merged.skipped!.push(...res.skipped);
-    ignoredDuplicatesCount += Array.isArray(res.skipped) ? res.skipped.length : 0;
-    filesCompleted += batch.length;
-    options?.onProgress?.(filesCompleted, files.length, true, {
-      fileIndex: filesCompleted,
-      fileCount: files.length,
-    });
-  }
-
+  const ignoredDuplicatesCount = Array.isArray(merged.skipped) ? merged.skipped.length : 0;
   return { ...merged, ignoredDuplicatesCount };
 }
 
@@ -358,6 +425,7 @@ export async function uploadGalleryFinals(
     outstandingBalanceGhs?: string | number;
     lockPreviews?: boolean;
     setId?: string | null;
+    applyWatermark?: boolean;
     onProgress?: (
       loaded: number,
       total: number,
@@ -370,66 +438,21 @@ export async function uploadGalleryFinals(
     return { ignoredDuplicatesCount: 0, created: [] };
   }
 
-  const batches = chunkFilesForGalleryUpload(files);
-  const created: ApiGalleryPhoto[] = [];
-  let ignoredDuplicatesCount = 0;
-  let filesCompleted = 0;
-  let lastMessage: string | undefined;
+  const result = await s3UploadGalleryFinals(galleryId, files, {
+    clientPaid: options?.clientPaid,
+    outstandingBalanceGhs: options?.outstandingBalanceGhs,
+    lockPreviews: options?.lockPreviews,
+    setId: options?.setId,
+    applyWatermark: options?.applyWatermark,
+    onProgress: options?.onProgress,
+  });
 
-  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-    const batch = batches[batchIndex]!;
-    const form = new FormData();
-    for (const file of batch) {
-      form.append("finals", file);
-    }
-    form.append("clientPaid", options?.clientPaid === false ? "false" : "true");
-    if (options?.clientPaid === false) {
-      if (options.outstandingBalanceGhs != null && String(options.outstandingBalanceGhs).trim()) {
-        form.append("outstandingBalanceGhs", String(options.outstandingBalanceGhs).trim());
-      }
-      if (options.lockPreviews === true) {
-        form.append("lockPreviews", "true");
-      }
-    }
-    if (options?.setId !== undefined) {
-      form.append("setId", options.setId === null ? "unsorted" : options.setId);
-    }
-
-    const res = await authedFormUpload<{
-      message?: string;
-      created?: ApiGalleryPhoto[];
-      skipped?: string[];
-    }>(`${galleryPath(galleryId)}/finals`, form, {
-      fallbackError: "Failed to upload finals",
-      ErrorCtor: FoldersApiError,
-      onUploadProgress: (loaded, total, lengthComputable) => {
-        scaleBatchUploadProgress(
-          batches,
-          batchIndex,
-          loaded,
-          total,
-          lengthComputable,
-          (l, t, c) => {
-            options?.onProgress?.(l, t, c, {
-              fileIndex: Math.min(files.length, filesCompleted + 1),
-              fileCount: files.length,
-            });
-          },
-        );
-      },
-    });
-
-    if (typeof res.message === "string") lastMessage = res.message;
-    if (Array.isArray(res.created)) created.push(...res.created);
-    ignoredDuplicatesCount += Array.isArray(res.skipped) ? res.skipped.length : 0;
-    filesCompleted += batch.length;
-    options?.onProgress?.(filesCompleted, files.length, true, {
-      fileIndex: filesCompleted,
-      fileCount: files.length,
-    });
-  }
-
-  return { message: lastMessage, created, ignoredDuplicatesCount };
+  const ignoredDuplicatesCount = Array.isArray(result.skipped) ? result.skipped.length : 0;
+  return {
+    message: result.message,
+    created: result.created as ApiGalleryPhoto[] | undefined,
+    ignoredDuplicatesCount,
+  };
 }
 
 export async function deleteGalleryUpload(
@@ -555,6 +578,36 @@ export async function patchGalleryFinalReply(
       body: JSON.stringify({ reply }),
     },
     "Failed to save reply",
+    FoldersApiError,
+  );
+}
+
+export async function reorderGalleryUploads(
+  galleryId: string,
+  photoIds: string[],
+): Promise<void> {
+  await authedJson(
+    `${galleryPath(galleryId)}/uploads/reorder`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ photoIds }),
+    },
+    "Failed to reorder uploads",
+    FoldersApiError,
+  );
+}
+
+export async function reorderGalleryFinals(
+  galleryId: string,
+  finalIds: string[],
+): Promise<void> {
+  await authedJson(
+    `${galleryPath(galleryId)}/finals/reorder`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ finalIds }),
+    },
+    "Failed to reorder finals",
     FoldersApiError,
   );
 }

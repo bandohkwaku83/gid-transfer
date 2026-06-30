@@ -5,6 +5,7 @@ import type { InputRef } from "antd/es/input";
 import { Check, ChevronDown, Search } from "lucide-react";
 import { FormSearchInput } from "@/components/ui/form-input";
 import { formModalInputClass } from "@/components/ui/form-modal";
+import { onboardingNativeControlClassName } from "@/lib/onboarding-field-styles";
 import type { ApiClient } from "@/lib/clients-api";
 import { cn } from "@/lib/utils";
 
@@ -33,6 +34,7 @@ type ClientSearchSelectProps = {
   id?: string;
   placeholder?: string;
   className?: string;
+  appearance?: "default" | "onboarding";
 };
 
 export function ClientSearchSelect({
@@ -44,6 +46,7 @@ export function ClientSearchSelect({
   id: idProp,
   placeholder = "Search and select a client…",
   className,
+  appearance = "default",
 }: ClientSearchSelectProps) {
   const autoId = useId();
   const listboxId = `${idProp ?? autoId}-listbox`;
@@ -131,10 +134,12 @@ export function ClientSearchSelect({
           setOpen((o) => !o);
         }}
         className={cn(
-          formModalInputClass,
+          appearance === "onboarding" ? onboardingNativeControlClassName : formModalInputClass,
           "mt-0 flex items-center justify-between gap-2 text-left",
-          !selected && "text-zinc-400 dark:text-zinc-500",
-          open && "border-brand ring-2 ring-brand/20",
+          !selected &&
+            (appearance === "onboarding" ? "text-neutral-400" : "text-zinc-400 dark:text-zinc-500"),
+          open &&
+            (appearance === "onboarding" ? "border-neutral-500" : "border-zinc-400"),
         )}
       >
         <span className="min-w-0 truncate">
@@ -168,7 +173,7 @@ export function ClientSearchSelect({
               placeholder="Search by name, email, or phone…"
               prefix={<Search className="h-4 w-4 text-zinc-400" aria-hidden />}
               aria-label="Search clients"
-              className="[&_.ant-input-affix-wrapper]:!rounded-lg [&_.ant-input-affix-wrapper]:!bg-zinc-50 [&_.ant-input-affix-wrapper]:!py-1.5 dark:[&_.ant-input-affix-wrapper]:!bg-zinc-900"
+              className="[&_.ant-input-affix-wrapper]:!bg-zinc-50 dark:[&_.ant-input-affix-wrapper]:!bg-zinc-900"
             />
           </div>
           <ul

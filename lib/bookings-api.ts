@@ -1,5 +1,8 @@
-import type { BookedShoot, ShootKind } from "@/components/schedules/booking-types";
-import { KIND_META } from "@/components/schedules/booking-types";
+import type { BookedShoot } from "@/components/schedules/booking-types";
+import {
+  FALLBACK_SHOOT_TYPES,
+  resolveShootCategoryFromApi,
+} from "@/lib/booking-shoot-types";
 import { ApiError } from "@/lib/clients-api";
 import { authedJson } from "@/lib/http";
 
@@ -39,12 +42,18 @@ export type ApiBooking = {
   _id: string;
   title: string;
   client: ApiBookingClient;
+  /** Display label (e.g. "Wedding"). */
   shootType: string;
+  /** Category slug (e.g. "wedding"). */
+  category?: string;
   color?: string;
   startsAt: string;
   endsAt: string | null;
   location?: string;
+  notes?: string;
   description?: string;
+  amountCharged?: number;
+  currency?: string;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -58,44 +67,41 @@ export type CreateBookingBody = {
   title: string;
   clientId: string;
   date: string;
+  /** Category id or label — API accepts both. */
   shootType: string;
   start: string;
   end: string;
   location: string;
-  description: string;
+  notes?: string;
+  description?: string;
+  amountCharged?: number | null;
+  currency?: string;
 };
 
 export type UpdateBookingBody = Partial<CreateBookingBody>;
 
-export function apiShootTypeToKind(shootType: string): ShootKind {
-  const k = shootType.trim().toLowerCase();
-  const map: Record<string, ShootKind> = {
-    wedding: "wedding",
-    christening: "christening",
-    portraits: "portraits",
-    portrait: "portraits",
-    outdoor: "outdoor",
-    birthday: "birthday",
-    graduation: "graduation",
-    commercial: "commercial",
-    other: "other",
-  };
-  return map[k] ?? "other";
-}
+const BOOKING_COLOR_DOT: Record<string, string> = {
+  red: "bg-rose-500",
+  teal: "bg-teal-500",
+  purple: "bg-violet-500",
+  green: "bg-emerald-500",
+  pink: "bg-fuchsia-500",
+  blue: "bg-indigo-500",
+  orange: "bg-amber-500",
+  sky: "bg-sky-500",
+  amber: "bg-amber-500",
+  indigo: "bg-indigo-500",
+  rose: "bg-rose-500",
+  cyan: "bg-cyan-500",
+  lime: "bg-lime-500",
+  violet: "bg-violet-500",
+  fuchsia: "bg-fuchsia-500",
+  emerald: "bg-emerald-500",
+};
 
 export function apiColorToDotClass(color?: string): string | null {
   if (!color) return null;
-  const c: Record<string, string> = {
-    red: "bg-rose-500",
-    teal: "bg-teal-500",
-    purple: "bg-violet-500",
-    green: "bg-emerald-500",
-    pink: "bg-fuchsia-500",
-    blue: "bg-indigo-500",
-    orange: "bg-amber-500",
-    sky: "bg-sky-500",
-  };
-  return c[color.trim().toLowerCase()] ?? null;
+  return BOOKING_COLOR_DOT[color.trim().toLowerCase()] ?? null;
 }
 
 export function formatHmToApi12h(hm: string): string {
@@ -114,7 +120,38 @@ function pad2(n: number) {
   return String(n).padStart(2, "0");
 }
 
-export function mapApiBookingToBookedShoot(b: ApiBooking): BookedShoot {
+function readAmountCharged(raw: unknown): number | undefined {
+  if (raw == null || raw === "") return undefined;
+  const n =
+    typeof raw === "number"
+      ? raw
+      : Number(String(raw).trim().replace(/,/g, ""));
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return n;
+}
+
+export function formatBookingAmount(
+  amount?: number,
+  currency = "GHS",
+): string | null {
+  if (amount == null || !Number.isFinite(amount) || amount <= 0) return null;
+  const code = currency.trim().toUpperCase() || "GHS";
+  const prefix = code === "GHS" ? "GH₵" : `${code} `;
+  return `${prefix}${amount.toLocaleString("en-GH", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+/** @deprecated Use {@link formatBookingAmount} */
+export function formatBookingAmountGhs(amount?: number): string | null {
+  return formatBookingAmount(amount, "GHS");
+}
+
+export function mapApiBookingToBookedShoot(
+  b: ApiBooking,
+  shootTypes: BookingShootTypeMeta[] = FALLBACK_SHOOT_TYPES,
+): BookedShoot {
   const client = b.client;
   const clientId = client?._id ?? "";
   const clientName = client?.name?.trim() || "Unknown client";
@@ -132,6 +169,12 @@ export function mapApiBookingToBookedShoot(b: ApiBooking): BookedShoot {
     endTime = `${pad2(end.getHours())}:${pad2(end.getMinutes())}`;
   }
 
+  const resolved = resolveShootCategoryFromApi(
+    { category: b.category, shootType: b.shootType },
+    shootTypes,
+  );
+  const notes = (b.notes ?? b.description ?? "").trim();
+
   return {
     id: b._id,
     title: b.title,
@@ -141,21 +184,29 @@ export function mapApiBookingToBookedShoot(b: ApiBooking): BookedShoot {
     startTime,
     endTime,
     location: b.location?.trim() || undefined,
-    kind: apiShootTypeToKind(b.shootType),
-    description: b.description?.trim() || undefined,
-    shootColor: b.color,
+    shootCategory: resolved.category,
+    shootTypeLabel: resolved.label,
+    notes: notes || undefined,
+    currency: (b.currency ?? "GHS").trim() || "GHS",
+    amountCharged:
+      readAmountCharged(b.amountCharged) ??
+      readAmountCharged((b as { amount_charged?: unknown }).amount_charged),
+    shootColor: b.color ?? resolved.color,
   };
 }
 
-export function kindToApiShootType(kind: ShootKind): string {
-  return KIND_META[kind].label;
+function bookingMatchesCategoryFilter(b: ApiBooking, categoryId: string): boolean {
+  const needle = categoryId.trim().toLowerCase();
+  const cat = b.category?.trim().toLowerCase();
+  if (cat && cat === needle) return true;
+  if (b.shootType.trim().toLowerCase() === needle) return true;
+  return false;
 }
 
 function filterByShootType(bookings: ApiBooking[], type?: string): ApiBooking[] {
   const t = type?.trim();
   if (!t) return bookings;
-  const needle = t.toLowerCase();
-  return bookings.filter((b) => b.shootType.trim().toLowerCase() === needle);
+  return bookings.filter((b) => bookingMatchesCategoryFilter(b, t));
 }
 
 export async function getBookingsMeta(): Promise<BookingsMetaResponse> {

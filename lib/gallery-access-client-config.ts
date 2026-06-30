@@ -1,6 +1,6 @@
-/** UI bridge: photographer dashboard ↔ client link until the API persists access codes. */
+/** Photographer dashboard ↔ client link bridge for access-code UI until fully API-driven. */
 const CONFIG_PREFIX = "gidostorage-gallery-access:";
-const UNLOCK_PREFIX = "gidostorage-gallery-unlocked:";
+const TOKEN_PREFIX = "gidostorage-gallery-access-token:";
 
 export type GalleryAccessClientConfig = {
   enabled: boolean;
@@ -11,8 +11,8 @@ export function galleryAccessConfigStorageKey(sessionId: string): string {
   return `${CONFIG_PREFIX}${sessionId}`;
 }
 
-export function galleryAccessUnlockStorageKey(sessionId: string): string {
-  return `${UNLOCK_PREFIX}${sessionId}`;
+export function galleryAccessTokenStorageKey(sessionId: string): string {
+  return `${TOKEN_PREFIX}${sessionId}`;
 }
 
 export function readGalleryAccessClientConfig(
@@ -45,29 +45,45 @@ export function writeGalleryAccessClientConfig(
   }
 }
 
-export function isGalleryAccessUnlocked(sessionId: string): boolean {
-  if (typeof window === "undefined" || !sessionId) return false;
+export function readGalleryAccessToken(sessionId: string): string | null {
+  if (typeof window === "undefined" || !sessionId) return null;
   try {
-    return window.sessionStorage.getItem(galleryAccessUnlockStorageKey(sessionId)) === "1";
+    const token = window.sessionStorage.getItem(galleryAccessTokenStorageKey(sessionId))?.trim();
+    return token || null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-export function markGalleryAccessUnlocked(sessionId: string): void {
+export function writeGalleryAccessToken(sessionId: string, token: string): void {
+  if (typeof window === "undefined" || !sessionId || !token.trim()) return;
+  try {
+    window.sessionStorage.setItem(galleryAccessTokenStorageKey(sessionId), token.trim());
+  } catch {
+    /* ignore quota */
+  }
+}
+
+export function clearGalleryAccessToken(sessionId: string): void {
   if (typeof window === "undefined" || !sessionId) return;
   try {
-    window.sessionStorage.setItem(galleryAccessUnlockStorageKey(sessionId), "1");
+    window.sessionStorage.removeItem(galleryAccessTokenStorageKey(sessionId));
   } catch {
     /* ignore */
+  }
+}
+
+export function isGalleryAccessUnlocked(sessionId: string): boolean {
+  return Boolean(readGalleryAccessToken(sessionId));
+}
+
+/** @deprecated Use {@link writeGalleryAccessToken} — kept for call-site compatibility. */
+export function markGalleryAccessUnlocked(sessionId: string, accessToken?: string): void {
+  if (accessToken?.trim()) {
+    writeGalleryAccessToken(sessionId, accessToken);
   }
 }
 
 export function clearGalleryAccessUnlock(sessionId: string): void {
-  if (typeof window === "undefined" || !sessionId) return;
-  try {
-    window.sessionStorage.removeItem(galleryAccessUnlockStorageKey(sessionId));
-  } catch {
-    /* ignore */
-  }
+  clearGalleryAccessToken(sessionId);
 }

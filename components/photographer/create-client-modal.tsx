@@ -7,12 +7,16 @@ import {
   FormField,
   FormModal,
   FormModalBody,
-  FormModalFooter,
   FormModalForm,
   FormModalHeader,
+  FormModalImageAside,
+  FormModalOnboardingFooter,
   FormModalSection,
+  FormModalSplitLayout,
+  FormModalSplitMain,
 } from "@/components/ui/form-modal";
 import { FormInput } from "@/components/ui/form-input";
+import { onboardingAntInputClassName } from "@/lib/onboarding-field-styles";
 import {
   createClient,
   updateClient,
@@ -29,6 +33,8 @@ type Props = {
   /** Stack above another modal (e.g. from gallery or booking). */
   elevated?: boolean;
 };
+
+const CLIENT_MODAL_IMAGE = "/images/client.jpg";
 
 export function CreateClientModal({ open, onClose, client, onSaved, elevated }: Props) {
   const { showToast } = useToast();
@@ -115,66 +121,77 @@ export function CreateClientModal({ open, onClose, client, onSaved, elevated }: 
   }
 
   return (
-    <FormModal open={open} onClose={handleClose} busy={busy} elevated={elevated} maxWidth="md">
-      <FormModalHeader
-        icon={UserPlus}
-        title={isEdit ? "Edit client" : "Add new client"}
-        description={
-          isEdit
-            ? "Update this client's details."
-            : "Register client details. Galleries are created later."
-        }
-      />
-      <FormModalForm id={formId} onSubmit={(e) => void submit(e)}>
-        <FormModalBody className="space-y-4">
-          <FormModalSection variant="plain">
-            <FormField label="Client name" required>
-              <FormInput
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Acme Studios"
-                disabled={busy}
-                autoFocus
-              />
-            </FormField>
+    <FormModal open={open} onClose={handleClose} busy={busy} elevated={elevated} maxWidth="splitWide">
+      <FormModalSplitLayout>
+        <FormModalSplitMain>
+          <FormModalHeader
+            icon={UserPlus}
+            title={isEdit ? "Edit client" : "Add new client"}
+            description={
+              isEdit
+                ? "Update this client's details."
+                : "Register client details"
+            }
+          />
+          <FormModalForm id={formId} onSubmit={(e) => void submit(e)}>
+            <FormModalBody className="space-y-5">
+              <FormModalSection variant="plain" title="Contact">
+                <FormField label="Client name" required appearance="onboarding">
+                  <FormInput
+                    className={onboardingAntInputClassName}
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="Enter name"
+                    disabled={busy}
+                    autoFocus
+                  />
+                </FormField>
 
-            <FormField label="Email">
-              <FormInput
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="contact@acme.com"
-                disabled={busy}
-              />
-            </FormField>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <FormField label="Email" appearance="onboarding">
+                    <FormInput
+                      className={onboardingAntInputClassName}
+                      type="email"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="Enter email"
+                      disabled={busy}
+                    />
+                  </FormField>
 
-            <FormField label="Contact number" required>
-              <FormInput
-                value={contact}
-                onChange={(e) => setContact(e.target.value)}
-                placeholder="+233200000000"
-                disabled={busy}
-              />
-            </FormField>
+                  <FormField label="Contact number" required appearance="onboarding">
+                    <FormInput
+                      className={onboardingAntInputClassName}
+                      value={contact}
+                      onChange={(e) => setContact(e.target.value)}
+                      placeholder="Enter contact"
+                      disabled={busy}
+                    />
+                  </FormField>
+                </div>
 
-            <FormField label="Location" required>
-              <FormInput
-                value={location}
-                onChange={(e) => setLocation(e.target.value)}
-                placeholder="e.g. Accra, Ghana"
-                disabled={busy}
-              />
-            </FormField>
-          </FormModalSection>
-        </FormModalBody>
-      </FormModalForm>
-      <FormModalFooter
-        onCancel={handleClose}
-        formId={formId}
-        submitLabel={isEdit ? "Save changes" : "Create client"}
-        busyLabel={isEdit ? "Saving…" : "Creating…"}
-        busy={busy}
-      />
+                <FormField label="Location" required appearance="onboarding">
+                  <FormInput
+                    className={onboardingAntInputClassName}
+                    value={location}
+                    onChange={(e) => setLocation(e.target.value)}
+                    placeholder="Enter location"
+                    disabled={busy}
+                  />
+                </FormField>
+              </FormModalSection>
+            </FormModalBody>
+          </FormModalForm>
+          <FormModalOnboardingFooter
+            formId={formId}
+            onCancel={handleClose}
+            submitLabel={isEdit ? "Save changes" : "Create client"}
+            busyLabel={isEdit ? "Saving…" : "Creating…"}
+            busy={busy}
+          />
+        </FormModalSplitMain>
+        <FormModalImageAside src={CLIENT_MODAL_IMAGE} />
+      </FormModalSplitLayout>
     </FormModal>
   );
 }

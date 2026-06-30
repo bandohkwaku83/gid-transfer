@@ -1,10 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import {
-  Building2,
   Calendar,
   CreditCard,
   ExternalLink,
@@ -26,17 +24,36 @@ import { formModalLabelClass } from "@/components/ui/form-modal";
 import { FormInput } from "@/components/ui/form-input";
 import {
   logout,
-  updatePhotographerStudioProfile,
   type DemoAuthUser,
-  type PhotographerStudioProfile,
 } from "@/lib/auth-demo";
 import {
-  PLANS,
-  countGalleriesTowardQuota,
-  type PlanId,
-} from "@/lib/subscription-plan";
-import type { SettingsTabId } from "@/lib/settings-tabs";
+  galleriesOverviewDisplay,
+  planNameToPlanId,
+  settingsErrorMessage,
+  studioLogoUrlFromSettings,
+  studioSlugFromSettings,
+  updateProfileSettings,
+  type SettingsPageData,
+} from "@/lib/settings-api";
 import { cn } from "@/lib/utils";
+import { PLANS, type PlanId } from "@/lib/subscription-plan";
+import type { SettingsTabId } from "@/lib/settings-tabs";
+import { StudioUrlField } from "@/components/studio/studio-url-field";
+import { SettingsSmsSection } from "@/components/settings/settings-sms-section";
+import { photographerSignOutUrl, studioSlugValidationMessage } from "@/lib/studio-url";
+
+const EMPTY_STUDIO = {
+  businessName: "",
+  companyName: "",
+  phone: null,
+  website: null,
+  logoSrc: null,
+  logoUrl: null,
+  studioUrl: null,
+  studioUrlHost: null,
+  studioUrlSuffix: null,
+  appHost: null,
+} as const;
 
 const MAX_LOGO_BYTES = 1_200_000;
 
@@ -68,39 +85,78 @@ function formatRole(role?: string): string {
 
 type SettingsProfileSectionProps = {
   auth: DemoAuthUser | null;
-  planId: PlanId;
+  pageData: SettingsPageData | null;
+  loading?: boolean;
   onTabChange: (tab: SettingsTabId) => void;
-  onProfileUpdated?: () => void;
+  onProfileUpdated?: (data: SettingsPageData) => void;
 };
 
 export function SettingsProfileSection({
   auth,
-  planId,
+  pageData,
+  loading = false,
   onTabChange,
   onProfileUpdated,
 }: SettingsProfileSectionProps) {
-  const router = useRouter();
   const { showToast } = useToast();
   const [busy, setBusy] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
 
   const studio = auth?.user?.studio;
-  const accountEmail = auth?.user?.email ?? auth?.email ?? "";
-  const memberSince = formatMemberSince(auth?.user?.createdAt);
-  const galleriesUsed = countGalleriesTowardQuota();
+  const apiStudio = pageData?.bundle.studio;
+  const apiProfile = pageData?.bundle.profile;
+  const apiOverview = pageData?.bundle.overview;
+  const apiAccount = pageData?.bundle.account;
+  const accountEmail =
+    apiAccount?.email ?? apiProfile?.email ?? auth?.user?.email ?? auth?.email ?? "";
+  const memberSince =
+    apiOverview?.memberSince.label ??
+    pageData?.user.memberSince?.label ??
+    formatMemberSince(auth?.user?.createdAt);
+  const planStorageLabel = apiOverview?.planStorage.label;
+  const planId: PlanId = apiProfile?.planName
+    ? planNameToPlanId(apiProfile.planName)
+    : "free";
   const plan = PLANS[planId];
+  const planLabel = apiProfile?.planName?.replace(/\s+plan$/i, "") ?? plan.label;
+  const galleriesLabel = galleriesOverviewDisplay(apiOverview?.galleries, {
+    used: 0,
+    limit: apiOverview ? null : plan.maxGalleries,
+  });
 
   const [companyName, setCompanyName] = useState("");
+  const [companySlug, setCompanySlug] = useState("");
+  const [slugManuallyEdited, setSlugManuallyEdited] = useState(false);
+  const [studioUrlSuffix, setStudioUrlSuffix] = useState("");
+  const [studioUrl, setStudioUrl] = useState<string | undefined>();
   const [phone, setPhone] = useState("");
   const [website, setWebsite] = useState("");
   const [logoDataUrl, setLogoDataUrl] = useState<string | undefined>();
+  const [logoFile, setLogoFile] = useState<File | null>(null);
 
   const syncFromAuth = useCallback(() => {
-    setCompanyName(studio?.companyName?.trim() ?? auth?.user?.name?.trim() ?? "");
-    setPhone(studio?.phone?.trim() ?? "");
-    setWebsite(studio?.website?.trim() ?? "");
-    setLogoDataUrl(studio?.logoDataUrl);
-  }, [auth?.user?.name, studio]);
+    const company =
+      apiStudio?.companyName?.trim() ||
+      apiStudio?.businessName?.trim() ||
+      studio?.companyName?.trim() ||
+      auth?.user?.name?.trim() ||
+      "";
+    setCompanyName(company);
+    setCompanySlug(
+      studioSlugFromSettings(apiStudio ?? EMPTY_STUDIO, studio?.companySlug),
+    );
+    setSlugManuallyEdited(false);
+    setStudioUrlSuffix(
+      apiStudio?.studioUrlSuffix?.trim() ?? studio?.studioUrlSuffix?.trim() ?? "",
+    );
+    setStudioUrl(apiStudio?.studioUrl?.trim() ?? studio?.studioUrl?.trim() ?? undefined);
+    setPhone(apiStudio?.phone?.trim() ?? studio?.phone?.trim() ?? "");
+    setWebsite(apiStudio?.website?.trim() ?? studio?.website?.trim() ?? "");
+    setLogoDataUrl(
+      (apiStudio ? studioLogoUrlFromSettings(apiStudio) : undefined) ?? studio?.logoDataUrl,
+    );
+    setLogoFile(null);
+  }, [apiStudio, auth?.user?.name, studio]);
 
   useEffect(() => {
     syncFromAuth();
@@ -122,6 +178,7 @@ export function SettingsProfileSection({
       if (typeof r === "string") setLogoDataUrl(r);
     };
     reader.readAsDataURL(file);
+    setLogoFile(file);
   }
 
   async function handleSave() {
@@ -131,23 +188,40 @@ export function SettingsProfileSection({
       showToast("Enter your studio or company name.", "error");
       return;
     }
+    const phoneTrimmed = phone.trim();
+    if (!phoneTrimmed) {
+      showToast("Enter your business phone.", "error");
+      return;
+    }
+    const slug = companySlug.trim();
+    if (!slug) {
+      showToast("Enter your studio URL.", "error");
+      return;
+    }
+    const slugValidation = studioSlugValidationMessage(slug);
+    if (slugValidation) {
+      showToast(slugValidation, "error");
+      return;
+    }
+
     const siteRaw = website.trim();
     const site =
       siteRaw && !/^https?:\/\//i.test(siteRaw) ? `https://${siteRaw}` : siteRaw;
 
     setBusy(true);
     try {
-      const profile: PhotographerStudioProfile = {
-        companyName: name,
-        ...(logoDataUrl ? { logoDataUrl } : {}),
-        ...(phone.trim() ? { phone: phone.trim() } : {}),
+      const saved = await updateProfileSettings({
+        businessName: name,
+        companySlug: slug,
+        phone: phoneTrimmed,
         ...(site ? { website: site } : {}),
-      };
-      updatePhotographerStudioProfile(profile);
-      onProfileUpdated?.();
+        ...(logoFile ? { logoFile } : {}),
+      });
+
+      onProfileUpdated?.(saved);
       showToast("Profile saved.", "success");
     } catch (e) {
-      showToast(e instanceof Error ? e.message : "Could not save profile.", "error");
+      showToast(settingsErrorMessage(e, "Could not save your profile."), "error");
     } finally {
       setBusy(false);
     }
@@ -156,26 +230,44 @@ export function SettingsProfileSection({
   async function handleSignOut() {
     if (signingOut) return;
     setSigningOut(true);
-    try {
-      await logout();
-      showToast("Signed out.", "success");
-      router.replace("/login");
-    } finally {
-      setSigningOut(false);
-    }
+    const loginUrl = photographerSignOutUrl();
+    await logout();
+    window.location.replace(loginUrl);
   }
 
-  const displayName = companyName.trim() || "Your studio";
-  const profileComplete = Boolean(auth?.user?.onboardingComplete && studio?.companyName?.trim());
+  const displayName =
+    companyName.trim() ||
+    apiProfile?.displayName?.trim() ||
+    apiStudio?.companyName?.trim() ||
+    apiStudio?.businessName?.trim() ||
+    "Your studio";
+  const profileComplete = apiProfile?.profileComplete ?? Boolean(auth?.user?.onboardingComplete && studio?.companyName?.trim());
+  const profileStatusLabel = apiProfile?.profileStatusLabel;
+  const avatarSrc =
+    apiProfile?.avatarSrc ??
+    (apiStudio ? studioLogoUrlFromSettings(apiStudio) : undefined);
+
+  if (loading && !pageData) {
+    return (
+      <div className="space-y-4">
+        <div className="h-28 animate-pulse rounded-2xl bg-zinc-100 dark:bg-zinc-900" />
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="h-20 animate-pulse rounded-xl bg-zinc-100 dark:bg-zinc-900" />
+          <div className="h-20 animate-pulse rounded-xl bg-zinc-100 dark:bg-zinc-900" />
+          <div className="h-20 animate-pulse rounded-xl bg-zinc-100 dark:bg-zinc-900" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex flex-col gap-4 rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 via-white to-brand/5 p-5 dark:border-zinc-800 dark:from-zinc-900/80 dark:via-zinc-950 dark:to-brand/10 sm:flex-row sm:items-center">
         <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
-          {logoDataUrl ? (
+          {logoDataUrl || avatarSrc ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={logoDataUrl} alt="" className="h-full w-full object-contain p-2" />
+            <img src={logoDataUrl ?? avatarSrc ?? ""} alt="" className="h-full w-full object-contain p-2" />
           ) : (
             <span className="font-display text-3xl font-semibold text-brand">
               {(displayName[0] ?? "S").toUpperCase()}
@@ -190,15 +282,15 @@ export function SettingsProfileSection({
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <span className="inline-flex items-center gap-1 rounded-full bg-brand/10 px-2.5 py-1 text-xs font-semibold text-brand dark:text-brand-on-dark">
               <CreditCard className="h-3 w-3" aria-hidden />
-              {plan.label} plan
+              {planLabel} plan
             </span>
             {profileComplete ? (
               <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
-                Profile complete
+                {profileStatusLabel ?? "Profile complete"}
               </span>
             ) : (
               <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-800 dark:text-amber-300">
-                Finish your studio details below
+                {profileStatusLabel ?? "Finish your studio details below"}
               </span>
             )}
           </div>
@@ -213,12 +305,7 @@ export function SettingsProfileSection({
             Galleries
           </p>
           <p className="mt-1 text-lg font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
-            {galleriesUsed}
-            {plan.maxGalleries != null ? (
-              <span className="text-sm font-normal text-zinc-500"> / {plan.maxGalleries}</span>
-            ) : (
-              <span className="text-sm font-normal text-zinc-500"> active</span>
-            )}
+            {galleriesLabel}
           </p>
         </div>
         <div className="rounded-xl border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950/50">
@@ -227,7 +314,7 @@ export function SettingsProfileSection({
             Plan storage
           </p>
           <p className="mt-1 text-lg font-semibold text-zinc-900 dark:text-zinc-50">
-            {formatPlanStorage(plan.storageBytes)}
+            {planStorageLabel ?? formatPlanStorage(plan.storageBytes)}
           </p>
         </div>
         <div className="rounded-xl border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950/50">
@@ -250,20 +337,19 @@ export function SettingsProfileSection({
           </p>
         </div>
 
-        <label className="block">
-          <span className={cn(labelClass, "inline-flex items-center gap-1.5 normal-case")}>
-            <Building2 className="h-3.5 w-3.5 text-zinc-400" aria-hidden />
-            Studio / company name
-          </span>
-          <FormInput
-            value={companyName}
-            onChange={(e) => setCompanyName(e.target.value)}
-            placeholder="e.g. North & Co. Photography"
-            disabled={busy}
-            autoComplete="organization"
-            className="mt-2"
-          />
-        </label>
+        <StudioUrlField
+          companyName={companyName}
+          onCompanyNameChange={(v) => setCompanyName(v)}
+          companySlug={companySlug}
+          onCompanySlugChange={setCompanySlug}
+          slugManuallyEdited={slugManuallyEdited}
+          onSlugManuallyEdited={setSlugManuallyEdited}
+          studioUrlSuffix={studioUrlSuffix}
+          studioUrl={studioUrl}
+          suggestedCompanySlug={apiStudio?.suggestedCompanySlug}
+          disabled={busy}
+          variant="settings"
+        />
 
         <div className="grid gap-4 sm:grid-cols-2">
           <label className="block">
@@ -275,7 +361,7 @@ export function SettingsProfileSection({
               type="tel"
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
-              placeholder="Optional"
+              placeholder="e.g. +1 555 0100"
               disabled={busy}
               autoComplete="tel"
               className="mt-2"
@@ -331,7 +417,10 @@ export function SettingsProfileSection({
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={() => setLogoDataUrl(undefined)}
+                  onClick={() => {
+                    setLogoDataUrl(undefined);
+                    setLogoFile(null);
+                  }}
                   className="rounded-lg px-3 py-2 text-xs font-semibold text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
                 >
                   Remove
@@ -384,6 +473,12 @@ export function SettingsProfileSection({
         </div>
       </section>
 
+      <SettingsSmsSection
+        auth={auth}
+        pageData={pageData}
+        onProfileUpdated={onProfileUpdated}
+      />
+
       {/* Account (read-only) */}
       <section className="space-y-3 rounded-2xl border border-zinc-200 p-5 dark:border-zinc-800">
         <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Account</p>
@@ -400,15 +495,17 @@ export function SettingsProfileSection({
               <Shield className="h-3.5 w-3.5" aria-hidden />
               Role
             </dt>
-            <dd className="text-zinc-900 dark:text-zinc-100">{formatRole(auth?.user?.role)}</dd>
+            <dd className="text-zinc-900 dark:text-zinc-100">
+              {formatRole(apiAccount?.role ?? auth?.user?.role)}
+            </dd>
           </div>
-          {auth?.user?._id ? (
+          {apiAccount?.accountId || auth?.user?._id ? (
             <div className="flex flex-col gap-1 py-3 sm:flex-row sm:items-start sm:justify-between">
               <dt className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
                 Account ID
               </dt>
               <dd className="max-w-full break-all font-mono text-xs text-zinc-600 dark:text-zinc-400">
-                {auth.user._id}
+                {apiAccount?.accountId ?? auth?.user?._id}
               </dd>
             </div>
           ) : null}

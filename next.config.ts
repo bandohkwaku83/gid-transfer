@@ -71,6 +71,16 @@ function buildImageRemotePatterns(): RemotePattern[] {
     hostname: "gidophotography-images.s3.us-east-1.amazonaws.com",
     pathname: "/**",
   });
+  add({
+    protocol: "https",
+    hostname: "gidtransfer.s3.amazonaws.com",
+    pathname: "/**",
+  });
+  add({
+    protocol: "https",
+    hostname: "gidtransfer.s3.us-east-1.amazonaws.com",
+    pathname: "/**",
+  });
 
   /* Placeholder photography for demo data and marketing pages. */
   add({ protocol: "https", hostname: "picsum.photos", pathname: "/**" });
@@ -102,9 +112,23 @@ const nextConfig: NextConfig = {
   images: {
     remotePatterns: buildImageRemotePatterns(),
     formats: ["image/avif", "image/webp"],
+    localPatterns: [
+      {
+        // Same-origin uploads (gallery covers, media). Omit `search` so `?v=` cache-bust is allowed.
+        pathname: "/uploads/**",
+      },
+      {
+        // Static marketing assets in `public/images/`.
+        pathname: "/images/**",
+      },
+    ],
   },
   /** LAN / alternate hostnames that may load the dev server (HMR, dev endpoints). */
   allowedDevOrigins: [
+    "localhost",
+    "http://localhost:3000",
+    "bizzles.localhost",
+    "http://bizzles.localhost:3000",
     "192.168.100.133",
     "http://192.168.100.133:3000",
     "http://192.168.100.133:3001",
@@ -141,6 +165,21 @@ const nextConfig: NextConfig = {
       {
         source: "/api/:path*",
         destination: `${BACKEND_API_URL}/api/:path*`,
+      },
+    ];
+  },
+  async redirects() {
+    return [
+      {
+        // Legacy Paystack callback paths → canonical route (outside AuthGate).
+        source: "/settings/billing/callback",
+        destination: "/billing/callback",
+        permanent: false,
+      },
+      {
+        source: "/dashboard/settings/billing/callback",
+        destination: "/billing/callback",
+        permanent: false,
       },
     ];
   },

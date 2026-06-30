@@ -6,43 +6,59 @@ import { CalendarPlus, UserPlus } from "lucide-react";
 import { useToast } from "@/components/toast-provider";
 import { CreateClientModal } from "@/components/photographer/create-client-modal";
 import { ClientSearchSelect } from "@/components/ui/client-search-select";
-import { FormSelect } from "@/components/ui/form-select";
+import { FormDatePicker } from "@/components/ui/form-date-picker";
+import { FormShootTypeSelect } from "@/components/ui/form-shoot-type-select";
 import {
   FormField,
   FormModal,
   FormModalBody,
-  FormModalFooter,
   FormModalForm,
   FormModalHeader,
+  FormModalImageAside,
+  FormModalOnboardingFooter,
   FormModalSection,
+  FormModalSplitLayout,
+  FormModalSplitMain,
   formModalSecondaryButtonClass,
 } from "@/components/ui/form-modal";
 import { FormInput, FormTextArea } from "@/components/ui/form-input";
-import type { BookedShoot, ShootKind } from "@/components/schedules/booking-types";
-import { KIND_META, SHOOT_KINDS_ORDER } from "@/components/schedules/booking-types";
+import {
+  onboardingAntInputClassName,
+  onboardingTextareaClassName,
+} from "@/lib/onboarding-field-styles";
+import {
+  formatAmountChargedInput,
+  parseAmountChargedInput,
+} from "@/lib/booking-amount";
 import type { BookingShootTypeMeta } from "@/lib/bookings-api";
-import { apiShootTypeToKind } from "@/lib/bookings-api";
+import {
+  FALLBACK_SHOOT_TYPES,
+  findShootTypeMeta,
+} from "@/lib/booking-shoot-types";
 import { listClients, type ApiClient } from "@/lib/clients-api";
+import { cn } from "@/lib/utils";
+import type { BookedShoot } from "@/components/schedules/booking-types";
 
 export type NewBookingDraft = Omit<BookedShoot, "id">;
+
+const BOOKING_MODAL_IMAGE = "/images/appointment.png";
 
 type Props = {
   open: boolean;
   onClose: () => void;
-  /** ISO date YYYY-MM-DD */
   defaultDate: string;
-  /** When set, the form opens in edit mode for this booking. */
   booking?: BookedShoot | null;
-  /** From `GET /api/bookings/meta` `shootTypes`; when empty, local defaults are used. */
   shootTypes?: BookingShootTypeMeta[];
   onSave: (draft: NewBookingDraft) => void | Promise<void>;
 };
 
-function defaultKindFromShootTypes(shootTypes: BookingShootTypeMeta[] | undefined): ShootKind {
-  if (shootTypes && shootTypes.length > 0) {
-    return apiShootTypeToKind(shootTypes[0].id);
-  }
-  return "portraits";
+function defaultShootCategory(shootTypes: BookingShootTypeMeta[]): string {
+  return (
+    findShootTypeMeta(shootTypes, "portraits")?.id ??
+    findShootTypeMeta(shootTypes, "wedding")?.id ??
+    shootTypes[0]?.id ??
+    "other"
+  );
 }
 
 export function NewBookingModal({
@@ -50,21 +66,27 @@ export function NewBookingModal({
   onClose,
   defaultDate,
   booking,
-  shootTypes,
+  shootTypes: shootTypesProp,
   onSave,
 }: Props) {
   const isEdit = Boolean(booking?.id);
   const { showToast } = useToast();
   const formId = useId();
 
+  const shootTypes = useMemo(
+    () => (shootTypesProp && shootTypesProp.length > 0 ? shootTypesProp : FALLBACK_SHOOT_TYPES),
+    [shootTypesProp],
+  );
+
   const [title, setTitle] = useState("");
   const [clientId, setClientId] = useState("");
   const [date, setDate] = useState(defaultDate);
   const [startTime, setStartTime] = useState("09:00");
   const [endTime, setEndTime] = useState("");
-  const [kind, setKind] = useState<ShootKind>("portraits");
+  const [shootCategory, setShootCategory] = useState("portraits");
   const [location, setLocation] = useState("");
-  const [description, setDescription] = useState("");
+  const [notes, setNotes] = useState("");
+  const [amountChargedInput, setAmountChargedInput] = useState("");
 
   const [clients, setClients] = useState<ApiClient[]>([]);
   const [clientsLoading, setClientsLoading] = useState(false);
@@ -91,16 +113,6 @@ export function NewBookingModal({
     ];
   }, [sortedClients, booking]);
 
-  const typeOptions = useMemo(() => {
-    if (shootTypes && shootTypes.length > 0) {
-      return shootTypes.map((t) => ({
-        value: apiShootTypeToKind(t.id),
-        label: t.label,
-      }));
-    }
-    return SHOOT_KINDS_ORDER.map((k) => ({ value: k, label: KIND_META[k].label }));
-  }, [shootTypes]);
-
   useEffect(() => {
     if (!open) return;
     if (booking) {
@@ -109,18 +121,20 @@ export function NewBookingModal({
       setClientId(booking.clientId);
       setStartTime(booking.startTime);
       setEndTime(booking.endTime ?? "");
-      setKind(booking.kind);
+      setShootCategory(booking.shootCategory);
       setLocation(booking.location ?? "");
-      setDescription(booking.description ?? "");
+      setNotes(booking.notes ?? "");
+      setAmountChargedInput(formatAmountChargedInput(booking.amountCharged));
     } else {
       setDate(defaultDate);
       setTitle("");
       setClientId("");
       setStartTime("09:00");
       setEndTime("");
-      setKind(defaultKindFromShootTypes(shootTypes));
+      setShootCategory(defaultShootCategory(shootTypes));
       setLocation("");
-      setDescription("");
+      setNotes("");
+      setAmountChargedInput("");
     }
     setAddClientOpen(false);
     setSubmitting(false);
@@ -161,6 +175,19 @@ export function NewBookingModal({
       showToast("Select a valid client.", "error");
       return;
     }
+
+    const parsedAmount = parseAmountChargedInput(amountChargedInput);
+    if (parsedAmount === null) {
+      showToast("Enter a valid amount charged (GHS).", "error");
+      return;
+    }
+
+    const meta = findShootTypeMeta(shootTypes, shootCategory);
+    if (!meta) {
+      showToast("Select a valid shoot type.", "error");
+      return;
+    }
+
     setSubmitting(true);
     try {
       await onSave({
@@ -171,8 +198,12 @@ export function NewBookingModal({
         startTime,
         endTime: endTime.trim() || undefined,
         location: location.trim() || undefined,
-        kind,
-        description: description.trim() || undefined,
+        shootCategory: meta.id,
+        shootTypeLabel: meta.label,
+        shootColor: meta.color,
+        notes: notes.trim() || undefined,
+        currency: "GHS",
+        amountCharged: parsedAmount ?? 0,
       });
       onClose();
     } catch (err) {
@@ -194,133 +225,173 @@ export function NewBookingModal({
 
   return (
     <>
-      <FormModal open={open} onClose={handleClose} busy={submitting}>
-        <FormModalHeader
-          icon={CalendarPlus}
-          title={isEdit ? "Edit booking" : "New booking"}
-          description={
-            isEdit
-              ? "Update shoot details, time, or client."
-              : "Schedule a shoot and link it to a client."
-          }
-          onClose={handleClose}
-          busy={submitting}
-        />
-        <FormModalForm id={formId} onSubmit={(e) => void handleSubmit(e)}>
-          <FormModalBody>
-            <FormModalSection title="Details">
-              <FormField label="Shoot title" required>
-                <FormInput
-                  required
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  placeholder="e.g. Smith wedding, ceremony"
-                  disabled={submitting}
-                />
-              </FormField>
+      <FormModal open={open} onClose={handleClose} busy={submitting} maxWidth="splitWide">
+        <FormModalSplitLayout>
+          <FormModalSplitMain>
+            <FormModalHeader
+              icon={CalendarPlus}
+              title={isEdit ? "Edit booking" : "New booking"}
+              description={
+                isEdit
+                  ? "Update shoot details, time, or client."
+                  : "Schedule a shoot and link it to a client."
+              }
+            />
+            <FormModalForm id={formId} onSubmit={(e) => void handleSubmit(e)}>
+              <FormModalBody className="space-y-5">
+                <FormModalSection variant="plain">
+                  <FormField label="Title" required appearance="onboarding">
+                    <FormInput
+                      className={onboardingAntInputClassName}
+                      required
+                      value={title}
+                      onChange={(e) => setTitle(e.target.value)}
+                      placeholder="e.g. Smith wedding, ceremony"
+                      disabled={submitting}
+                      autoFocus
+                    />
+                  </FormField>
 
-              <FormField
-                label="Client"
-                required
-                htmlFor="new-booking-client"
-                action={
-                  <button
-                    type="button"
-                    disabled={submitting}
-                    onClick={() => setAddClientOpen(true)}
-                    className={formModalSecondaryButtonClass}
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <FormField
+                      label="Shoot type"
+                      htmlFor="new-booking-shoot-type"
+                      required
+                      appearance="onboarding"
+                    >
+                      <FormShootTypeSelect
+                        id="new-booking-shoot-type"
+                        shootTypes={shootTypes}
+                        value={shootCategory}
+                        onChange={setShootCategory}
+                        disabled={submitting}
+                      />
+                    </FormField>
+                    <FormField label="Amount charged (GHS)" appearance="onboarding">
+                      <FormInput
+                        className={onboardingAntInputClassName}
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        inputMode="decimal"
+                        value={amountChargedInput}
+                        onChange={(e) => setAmountChargedInput(e.target.value)}
+                        placeholder="0.00"
+                        disabled={submitting}
+                      />
+                    </FormField>
+                  </div>
+                </FormModalSection>
+
+                <FormModalSection variant="plain">
+                  <FormField
+                    label="Client"
+                    required
+                    appearance="onboarding"
+                    htmlFor="new-booking-client"
+                    action={
+                      <button
+                        type="button"
+                        disabled={submitting}
+                        onClick={() => setAddClientOpen(true)}
+                        className={formModalSecondaryButtonClass}
+                      >
+                        <UserPlus
+                          className="h-3.5 w-3.5 shrink-0 text-brand dark:text-brand-on-dark"
+                          aria-hidden
+                        />
+                        Add client
+                      </button>
+                    }
+                    hint={
+                      !clientsLoading && clients.length === 0
+                        ? "No clients yet. Use Add client to create one."
+                        : undefined
+                    }
                   >
-                    <UserPlus className="h-3.5 w-3.5 shrink-0 text-brand dark:text-brand-on-dark" aria-hidden />
-                    Add client
-                  </button>
-                }
-                hint={
-                  !clientsLoading && clients.length === 0
-                    ? "No clients yet. Use Add client to create one."
-                    : undefined
-                }
-              >
-                <ClientSearchSelect
-                  id="new-booking-client"
-                  clients={clientsForSelect}
-                  value={clientId}
-                  onChange={setClientId}
-                  loading={clientsLoading}
-                  disabled={submitting}
-                />
-              </FormField>
+                    <ClientSearchSelect
+                      id="new-booking-client"
+                      appearance="onboarding"
+                      clients={clientsForSelect}
+                      value={clientId}
+                      onChange={setClientId}
+                      loading={clientsLoading}
+                      disabled={submitting}
+                    />
+                  </FormField>
+                </FormModalSection>
 
-              <div className="grid gap-4 sm:grid-cols-2">
-                <FormField label="Date" required>
-                  <FormInput
-                    required
-                    type="date"
-                    value={date}
-                    onChange={(e) => setDate(e.target.value)}
-                    disabled={submitting}
-                  />
-                </FormField>
-                <FormField label="Shoot type" htmlFor="new-booking-shoot-type">
-                  <FormSelect<ShootKind>
-                    id="new-booking-shoot-type"
-                    value={kind}
-                    onChange={setKind}
-                    disabled={submitting}
-                    options={typeOptions.map((o) => ({ value: o.value, label: o.label }))}
-                  />
-                </FormField>
-              </div>
+                <FormModalSection variant="plain" title="Schedule">
+                  <div className="grid gap-4 sm:grid-cols-3">
+                    <FormField label="Date" required appearance="onboarding">
+                      <FormDatePicker
+                        appearance="onboarding"
+                        value={date}
+                        onChange={setDate}
+                        disabled={submitting}
+                        inputReadOnly
+                      />
+                    </FormField>
+                    <FormField label="Start" required appearance="onboarding">
+                      <FormInput
+                        className={onboardingAntInputClassName}
+                        required
+                        type="time"
+                        value={startTime}
+                        onChange={(e) => setStartTime(e.target.value)}
+                        disabled={submitting}
+                      />
+                    </FormField>
+                    <FormField label="End" appearance="onboarding">
+                      <FormInput
+                        className={onboardingAntInputClassName}
+                        type="time"
+                        value={endTime}
+                        onChange={(e) => setEndTime(e.target.value)}
+                        disabled={submitting}
+                      />
+                    </FormField>
+                  </div>
+                </FormModalSection>
 
-              <div className="grid gap-4 sm:grid-cols-2">
-                <FormField label="Start" required>
-                  <FormInput
-                    required
-                    type="time"
-                    value={startTime}
-                    onChange={(e) => setStartTime(e.target.value)}
-                    disabled={submitting}
-                  />
-                </FormField>
-                <FormField label="End" optional>
-                  <FormInput
-                    type="time"
-                    value={endTime}
-                    onChange={(e) => setEndTime(e.target.value)}
-                    disabled={submitting}
-                  />
-                </FormField>
-              </div>
+                <FormModalSection variant="plain">
+                  <FormField label="Location" appearance="onboarding">
+                    <FormInput
+                      className={onboardingAntInputClassName}
+                      value={location}
+                      onChange={(e) => setLocation(e.target.value)}
+                      placeholder="Venue or address"
+                      disabled={submitting}
+                    />
+                  </FormField>
 
-              <FormField label="Location" optional>
-                <FormInput
-                  value={location}
-                  onChange={(e) => setLocation(e.target.value)}
-                  placeholder="Venue or address"
-                  disabled={submitting}
-                />
-              </FormField>
-
-              <FormField label="Notes" optional>
-                <FormTextArea
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  rows={2}
-                  placeholder="Optional notes for this booking…"
-                  className="min-h-[72px]"
-                  disabled={submitting}
-                />
-              </FormField>
-            </FormModalSection>
-          </FormModalBody>
-        </FormModalForm>
-        <FormModalFooter
-          onCancel={handleClose}
-          formId={formId}
-          submitLabel={isEdit ? "Save changes" : "Save booking"}
-          busyLabel="Saving…"
-          busy={submitting}
-          submitDisabled={!clientId || clientsLoading}
-        />
+                  <FormField label="Notes" appearance="onboarding">
+                    <FormTextArea
+                      value={notes}
+                      onChange={(e) => setNotes(e.target.value)}
+                      rows={4}
+                      placeholder="Optional notes for this booking…"
+                      className={onboardingTextareaClassName}
+                      disabled={submitting}
+                    />
+                  </FormField>
+                </FormModalSection>
+              </FormModalBody>
+            </FormModalForm>
+            <FormModalOnboardingFooter
+              formId={formId}
+              onCancel={handleClose}
+              submitLabel={isEdit ? "Save changes" : "Save booking"}
+              busyLabel="Saving…"
+              busy={submitting}
+              submitDisabled={!clientId || clientsLoading}
+            />
+          </FormModalSplitMain>
+          <FormModalImageAside
+            src={BOOKING_MODAL_IMAGE}
+            imagePositionClassName="object-[72%_center]"
+          />
+        </FormModalSplitLayout>
       </FormModal>
 
       <CreateClientModal

@@ -1,8 +1,9 @@
 import {
   effectiveLogoDataUrl,
+  watermarkLogoMetrics,
+  watermarkLogoPlacement,
   type BrandWatermarkSettings,
   type WatermarkLogoCrop,
-  type WatermarkPosition,
   type WatermarkTemplateSettings,
 } from "@/lib/watermark-brand";
 
@@ -28,35 +29,6 @@ function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number)
       quality ?? 0.92,
     );
   });
-}
-
-/** Inset from photo edges so the logo is not flush against the border. */
-function paddingPx(w: number, h: number): number {
-  const min = Math.min(w, h);
-  return Math.max(16, Math.round(min * 0.045));
-}
-
-function positionCoords(
-  position: WatermarkPosition,
-  canvasW: number,
-  canvasH: number,
-  logoW: number,
-  logoH: number,
-  pad: number,
-): { x: number; y: number } {
-  switch (position) {
-    case "top-left":
-      return { x: pad, y: pad };
-    case "top-right":
-      return { x: canvasW - logoW - pad, y: pad };
-    case "bottom-left":
-      return { x: pad, y: canvasH - logoH - pad };
-    case "center":
-      return { x: (canvasW - logoW) / 2, y: (canvasH - logoH) / 2 };
-    case "bottom-right":
-    default:
-      return { x: canvasW - logoW - pad, y: canvasH - logoH - pad };
-  }
 }
 
 function drawCroppedLogo(
@@ -99,24 +71,21 @@ async function compositeWatermark(
 
     ctx.drawImage(baseImg, 0, 0);
 
-    const minEdge = Math.min(canvas.width, canvas.height);
-    const targetW = (minEdge * template.sizePercent) / 100;
-    const aspect = logoImg.naturalWidth / Math.max(1, logoImg.naturalHeight);
-    let logoW = targetW;
-    let logoH = targetW / aspect;
-    if (logoH > minEdge * 0.4) {
-      logoH = minEdge * 0.4;
-      logoW = logoH * aspect;
-    }
+    const { logoW, logoH } = watermarkLogoMetrics(
+      canvas.width,
+      canvas.height,
+      logoImg.naturalWidth,
+      logoImg.naturalHeight,
+      template.sizePercent,
+    );
 
-    const pad = paddingPx(canvas.width, canvas.height);
-    const { x, y } = positionCoords(
-      template.position,
+    const { x, y } = watermarkLogoPlacement(
+      template.posX,
+      template.posY,
       canvas.width,
       canvas.height,
       logoW,
       logoH,
-      pad,
     );
 
     ctx.save();

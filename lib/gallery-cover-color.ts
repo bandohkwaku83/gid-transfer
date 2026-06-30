@@ -21,6 +21,17 @@ export const GALLERY_COVER_COLOR_PRESETS: readonly GalleryCoverColorPreset[] = [
   { id: "cream", hex: "#f4f1ea", label: "Cream" },
 ] as const;
 
+/** Swatches for cover hero title text and “View gallery” button accents. */
+export const GALLERY_COVER_ACCENT_PRESETS: readonly GalleryCoverColorPreset[] = [
+  { id: "white", hex: "#ffffff", label: "White" },
+  { id: "charcoal", hex: "#18181b", label: "Charcoal" },
+  { id: "cream", hex: "#f4f1ea", label: "Cream" },
+  { id: "ink", hex: "#0f172a", label: "Ink" },
+] as const;
+
+export const COVER_ACCENT_LIGHT = "#ffffff";
+export const COVER_ACCENT_DARK = "#18181b";
+
 export function normalizeGalleryCoverColor(value: unknown): string {
   if (typeof value !== "string") return DEFAULT_GALLERY_COVER_COLOR;
   const trimmed = value.trim();
@@ -67,6 +78,30 @@ export function coverColorLuminance(hex: string): number {
 
 export function coverColorUsesLightText(hex: string): boolean {
   return coverColorLuminance(hex) < 0.42;
+}
+
+/** Resolved hero title color — explicit picker value or auto contrast from backdrop. */
+export function resolveGalleryCoverTextColor(
+  backdropHex: string | undefined,
+  explicit?: string | null,
+): string {
+  if (typeof explicit === "string" && explicit.trim()) {
+    return normalizeGalleryCoverColor(explicit);
+  }
+  const backdrop = normalizeGalleryCoverColor(backdropHex);
+  return coverColorUsesLightText(backdrop) ? COVER_ACCENT_LIGHT : COVER_ACCENT_DARK;
+}
+
+/** Resolved “View gallery” button text + border color. */
+export function resolveGalleryCoverButtonColor(
+  backdropHex: string | undefined,
+  explicit?: string | null,
+): string {
+  if (typeof explicit === "string" && explicit.trim()) {
+    return normalizeGalleryCoverColor(explicit);
+  }
+  const backdrop = normalizeGalleryCoverColor(backdropHex);
+  return coverColorUsesLightText(backdrop) ? COVER_ACCENT_LIGHT : COVER_ACCENT_DARK;
 }
 
 /** Styles that paint a solid or tinted backdrop (not full-bleed image-only). */

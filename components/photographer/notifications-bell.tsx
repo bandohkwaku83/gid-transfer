@@ -211,9 +211,9 @@ export function NotificationsBell() {
       <button
         type="button"
         className={cn(
-          "relative inline-flex h-9 w-9 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-600 transition hover:bg-zinc-50",
-          "dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800",
-          open && "ring-2 ring-brand/35 dark:ring-brand/40",
+          "relative inline-flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition hover:bg-zinc-200/70 hover:text-zinc-800",
+          "dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100",
+          open && "bg-zinc-200/70 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-100",
         )}
         aria-label="Notifications"
         aria-expanded={open}

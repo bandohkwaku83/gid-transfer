@@ -1,7 +1,6 @@
-import { getAuth } from "@/lib/auth-demo";
-import { listDemoFoldersApiModels } from "@/lib/demo-api-bridge";
-import { loadAllClients } from "@/lib/demo-data";
-import { HttpError } from "@/lib/http";
+import { sameOriginUploadsUrl } from "@/lib/api";
+import { authedJson, HttpError } from "@/lib/http";
+import type { WeeklyBar } from "@/lib/dashboard-chart-data";
 
 import type { ApiClient } from "@/lib/clients-api";
 import type { ApiFolder } from "@/lib/folders-api";
@@ -22,11 +21,13 @@ export type DashboardStats = {
 export type DashboardRecentGallery = {
   id: string;
   title?: string;
+  clientId?: string;
   clientName: string;
   coverImageUrl?: string;
   status?: string;
   updatedAt?: string;
   createdAt?: string;
+  eventDate?: string;
 };
 
 export type DashboardActivityItem = {
@@ -35,6 +36,26 @@ export type DashboardActivityItem = {
   targetName?: string;
   galleryId?: string;
   at: string;
+  thumbnailUrl?: string;
+  kind?: "new" | "updated" | "completed" | "selection";
+};
+
+export type DashboardStorage = {
+  total: number;
+  raws: number;
+  selections: number;
+  finals: number;
+  planBytes: number;
+  planName?: string;
+};
+
+export type DashboardWeeklyActivity = {
+  today: number;
+  thisWeek: number;
+  previousWeek: number;
+  todayDelta: number;
+  weekDelta: number;
+  chart: WeeklyBar[];
 };
 
 export type DashboardResponse = {
@@ -43,14 +64,234 @@ export type DashboardResponse = {
   stats: DashboardStats;
   recentGalleries: DashboardRecentGallery[];
   activity: DashboardActivityItem[];
+  storage: DashboardStorage;
+  weeklyActivity: DashboardWeeklyActivity;
 };
 
 export class DashboardApiError extends HttpError {}
 
+export const DASHBOARD_HOME_LIST_LIMIT = 5;
+export const LIVE_FEED_LIMIT = 2;
+
+type BackendStats = {
+  clients?: number;
+  galleries?: number;
+  inProgress?: number;
+  completed?: number;
+};
+
+type BackendStorage = {
+  usedBytes?: number;
+  limitBytes?: number;
+  planName?: string;
+  breakdown?: {
+    rawsBytes?: number;
+    selectionsBytes?: number;
+    finalsBytes?: number;
+  };
+};
+
+type BackendWeeklySeries = {
+  date?: string;
+  label?: string;
+  total?: number;
+};
+
+type BackendWeeklyActivity = {
+  today?: number;
+  thisWeek?: number;
+  previousWeek?: number;
+  trend?: number;
+  chart?: {
+    series?: BackendWeeklySeries[];
+  };
+};
+
+type BackendActivity = {
+  id?: string;
+  galleryId?: string;
+  name?: string;
+  action?: string;
+  actionLabel?: string;
+  occurredAt?: string;
+  thumbnailUrl?: string;
+};
+
+type BackendRecentGallery = {
+  id?: string;
+  name?: string;
+  eventDate?: string;
+  status?: string;
+  coverImageUrl?: string;
+  displayCoverUrl?: string;
+  thumbnailUrl?: string;
+  client?: { id?: string; name?: string };
+  updatedAt?: string;
+  createdAt?: string;
+};
+
+type BackendUser = {
+  _id?: string;
+  email?: string;
+  studio?: { companyName?: string };
+};
+
+type BackendDashboardResponse = {
+  stats?: BackendStats;
+  storage?: BackendStorage;
+  weeklyActivity?: BackendWeeklyActivity;
+  recentActivity?: BackendActivity[];
+  recentGalleries?: BackendRecentGallery[];
+  user?: BackendUser;
+};
+
+function resolveMediaUrl(url?: string | null): string | undefined {
+  if (!url?.trim()) return undefined;
+  return sameOriginUploadsUrl(url.trim());
+}
+
+function readUserName(user: BackendUser | undefined): string {
+  const company = user?.studio?.companyName?.trim();
+  if (company) return company;
+  const email = user?.email?.trim();
+  if (email) {
+    const local = email.split("@")[0]?.trim();
+    if (local) return local;
+  }
+  return "there";
+}
+
+function actionToKind(action?: string): DashboardActivityItem["kind"] {
+  const a = (action ?? "").toLowerCase();
+  if (a === "created" || a === "new") return "new";
+  if (a === "delivered" || a === "completed" || a === "done") return "completed";
+  if (a === "selection" || a === "selecting" || a === "proofing") return "selection";
+  return "updated";
+}
+
+function mapStats(raw: BackendStats | undefined): DashboardStats {
+  return {
+    totalClients: raw?.clients ?? 0,
+    totalGalleries: raw?.galleries ?? 0,
+    inProgressGalleries: raw?.inProgress ?? 0,
+    completedGalleries: raw?.completed ?? 0,
+  };
+}
+
+function mapStorage(raw: BackendStorage | undefined): DashboardStorage {
+  const breakdown = raw?.breakdown;
+  return {
+    total: raw?.usedBytes ?? 0,
+    raws: breakdown?.rawsBytes ?? 0,
+    selections: breakdown?.selectionsBytes ?? 0,
+    finals: breakdown?.finalsBytes ?? 0,
+    planBytes: raw?.limitBytes ?? 5 * 1024 * 1024 * 1024,
+    planName: raw?.planName,
+  };
+}
+
+function mapWeeklyActivity(raw: BackendWeeklyActivity | undefined): DashboardWeeklyActivity {
+  const today = raw?.today ?? 0;
+  const thisWeek = raw?.thisWeek ?? 0;
+  const previousWeek = raw?.previousWeek ?? 0;
+  const series = raw?.chart?.series ?? [];
+  const chart: WeeklyBar[] = series.map((point) => ({
+    dateKey: point.date ?? "",
+    label: point.label ?? "",
+    value: point.total ?? 0,
+  }));
+
+  const todayPoint = series[series.length - 1];
+  const yesterdayPoint = series[series.length - 2];
+  const todayDelta =
+    todayPoint != null && yesterdayPoint != null
+      ? (todayPoint.total ?? 0) - (yesterdayPoint.total ?? 0)
+      : today;
+
+  return {
+    today,
+    thisWeek,
+    previousWeek,
+    todayDelta,
+    weekDelta: raw?.trend ?? thisWeek - previousWeek,
+    chart,
+  };
+}
+
+function mapRecentGallery(raw: BackendRecentGallery): DashboardRecentGallery | null {
+  const id = raw.id?.trim();
+  if (!id) return null;
+  const cover =
+    resolveMediaUrl(raw.displayCoverUrl) ??
+    resolveMediaUrl(raw.coverImageUrl) ??
+    resolveMediaUrl(raw.thumbnailUrl);
+  return {
+    id,
+    title: raw.name?.trim() || undefined,
+    clientId: raw.client?.id?.trim() || undefined,
+    clientName: raw.client?.name?.trim() || "Client",
+    coverImageUrl: cover,
+    status: raw.status,
+    updatedAt: raw.updatedAt,
+    createdAt: raw.createdAt,
+    eventDate: raw.eventDate,
+  };
+}
+
+function mapActivity(raw: BackendActivity): DashboardActivityItem | null {
+  const galleryId = raw.galleryId?.trim() || raw.id?.trim();
+  const at = raw.occurredAt?.trim();
+  if (!at) return null;
+  const action = raw.actionLabel?.trim() || raw.action?.trim() || "Updated";
+  const name = raw.name?.trim();
+  return {
+    action,
+    targetType: "gallery",
+    targetName: name,
+    galleryId: galleryId || undefined,
+    at,
+    thumbnailUrl: resolveMediaUrl(raw.thumbnailUrl),
+    kind: actionToKind(raw.action),
+  };
+}
+
+function mapDashboardResponse(raw: BackendDashboardResponse): DashboardResponse {
+  const userRaw = raw.user;
+  const user: DashboardUser = {
+    _id: userRaw?._id?.trim() || "",
+    name: readUserName(userRaw),
+    email: userRaw?.email?.trim() || "",
+  };
+
+  const recentGalleries = (raw.recentGalleries ?? [])
+    .map(mapRecentGallery)
+    .filter((g): g is DashboardRecentGallery => g != null);
+
+  const activity = (raw.recentActivity ?? [])
+    .map(mapActivity)
+    .filter((a): a is DashboardActivityItem => a != null);
+
+  const latestStamp =
+    activity[0]?.at ??
+    recentGalleries[0]?.updatedAt ??
+    recentGalleries[0]?.createdAt ??
+    new Date().toISOString();
+
+  return {
+    user,
+    serverDate: latestStamp,
+    stats: mapStats(raw.stats),
+    recentGalleries,
+    activity,
+    storage: mapStorage(raw.storage),
+    weeklyActivity: mapWeeklyActivity(raw.weeklyActivity),
+  };
+}
+
 export function dashboardRecentGalleryToApiFolder(g: DashboardRecentGallery): ApiFolder {
   const title = g.title?.trim() || "";
   const clientObj: ApiClient = {
-    _id: `${g.id}-client`,
+    _id: g.clientId?.trim() || `${g.id}-client`,
     name: g.clientName,
     email: "",
     contact: "",
@@ -60,7 +301,7 @@ export function dashboardRecentGalleryToApiFolder(g: DashboardRecentGallery): Ap
     _id: g.id,
     client: clientObj,
     eventName: title,
-    eventDate: (g.createdAt ?? "").slice(0, 10),
+    eventDate: (g.eventDate ?? g.createdAt ?? "").slice(0, 10),
     description: g.clientName,
     coverImageUrl: g.coverImageUrl,
     status: g.status,
@@ -74,64 +315,27 @@ export function activityItemToLabel(a: DashboardActivityItem): string {
   return `${a.action}, ${target}`;
 }
 
-export const DASHBOARD_HOME_LIST_LIMIT = 6;
+export type FetchDashboardOptions = {
+  recentLimit?: number;
+  activityDays?: number;
+};
 
-async function delay(ms = 20) {
-  await new Promise((r) => setTimeout(r, ms));
-}
-
-export async function fetchDashboard(): Promise<DashboardResponse> {
-  await delay();
-  const auth = typeof window !== "undefined" ? getAuth() : null;
-  const user: DashboardUser = auth?.user
-    ? { _id: auth.user._id, name: auth.user.name, email: auth.user.email }
-    : {
-        _id: "demo-local",
-        name: "Demo photographer",
-        email: auth?.email?.trim() || "demo@local.test",
-      };
-
-  const clients = loadAllClients();
-  const folders = listDemoFoldersApiModels();
-  const completed = folders.filter((f) =>
-    ["completed", "complete", "delivered"].includes((f.status ?? "").toLowerCase()),
-  );
-  const inProgress = folders.length - completed.length;
-
-  const sorted = [...folders].sort((a, b) => {
-    const ta = new Date(a.updatedAt ?? a.createdAt ?? 0).getTime();
-    const tb = new Date(b.updatedAt ?? b.createdAt ?? 0).getTime();
-    return tb - ta;
+export async function fetchDashboard(
+  options: FetchDashboardOptions = {},
+): Promise<DashboardResponse> {
+  const recentLimit = options.recentLimit ?? 10;
+  const activityDays = options.activityDays ?? 7;
+  const qs = new URLSearchParams({
+    recentLimit: String(recentLimit),
+    activityDays: String(activityDays),
   });
 
-  const recentGalleries: DashboardRecentGallery[] = sorted.slice(0, DASHBOARD_HOME_LIST_LIMIT).map((f) => ({
-    id: f._id,
-    title: f.eventName,
-    clientName: typeof f.client === "object" ? f.client.name : "Client",
-    coverImageUrl: f.coverImageUrl,
-    status: f.status,
-    updatedAt: f.updatedAt,
-    createdAt: f.createdAt,
-  }));
+  const raw = await authedJson<BackendDashboardResponse>(
+    `/api/dashboard?${qs.toString()}`,
+    { method: "GET" },
+    "Failed to load dashboard",
+    DashboardApiError,
+  );
 
-  const activity: DashboardActivityItem[] = recentGalleries.slice(0, DASHBOARD_HOME_LIST_LIMIT).map((g, i) => ({
-    action: i % 2 === 0 ? "Updated gallery" : "Viewed gallery",
-    targetType: "gallery",
-    targetName: g.title ?? g.clientName,
-    galleryId: g.id,
-    at: g.updatedAt ?? g.createdAt ?? new Date().toISOString(),
-  }));
-
-  return {
-    user,
-    serverDate: new Date().toISOString(),
-    stats: {
-      totalClients: clients.length,
-      totalGalleries: folders.length,
-      inProgressGalleries: Math.max(0, inProgress),
-      completedGalleries: completed.length,
-    },
-    recentGalleries,
-    activity,
-  };
+  return mapDashboardResponse(raw);
 }

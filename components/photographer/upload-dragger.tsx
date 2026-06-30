@@ -1,7 +1,8 @@
 "use client";
 
 import { Upload } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useId, useRef, useState, type DragEvent } from "react";
+import { collectFilesFromDataTransfer } from "@/lib/upload-folder-files";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -11,6 +12,12 @@ type Props = {
   disabled?: boolean;
   /** Slim bar when the gallery already has uploads. */
   compact?: boolean;
+  /** When true, dropped folders are expanded and their files uploaded individually. */
+  allowDirectory?: boolean;
+  /** Optional filter applied after files/folders are collected. */
+  filterFile?: (file: File) => boolean;
+  /** Called when files were found but none passed `filterFile`. */
+  onFilteredEmpty?: () => void;
   onFiles: (files: File[]) => void;
 };
 
@@ -20,28 +27,54 @@ export function UploadDragger({
   accept = "image/jpeg,image/png,image/webp,image/gif",
   disabled,
   compact = false,
+  allowDirectory = false,
+  filterFile,
+  onFilteredEmpty,
   onFiles,
 }: Props) {
+  const inputId = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
 
-  const handleFiles = useCallback(
+  const emitFiles = useCallback(
+    (files: File[]) => {
+      if (disabled) return;
+      const next = filterFile ? files.filter(filterFile) : files;
+      if (files.length > 0 && next.length === 0) {
+        onFilteredEmpty?.();
+        return;
+      }
+      if (next.length === 0) return;
+      onFiles(next);
+    },
+    [disabled, filterFile, onFilteredEmpty, onFiles],
+  );
+
+  const handleFileList = useCallback(
     (list: FileList | null) => {
       if (!list?.length || disabled) return;
-      onFiles(Array.from(list));
+      emitFiles(Array.from(list));
+      if (inputRef.current) inputRef.current.value = "";
     },
-    [disabled, onFiles],
+    [disabled, emitFiles],
+  );
+
+  const handleDrop = useCallback(
+    async (event: DragEvent<HTMLLabelElement>) => {
+      event.preventDefault();
+      setOver(false);
+      if (disabled) return;
+      const files = allowDirectory
+        ? await collectFilesFromDataTransfer(event.dataTransfer)
+        : Array.from(event.dataTransfer.files);
+      emitFiles(files);
+    },
+    [allowDirectory, disabled, emitFiles],
   );
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          (e.target as HTMLElement).querySelector("input")?.click();
-        }
-      }}
+    <label
+      htmlFor={inputId}
       onDragEnter={(e) => {
         e.preventDefault();
         setOver(true);
@@ -54,13 +87,9 @@ export function UploadDragger({
         e.preventDefault();
         if (e.currentTarget === e.target) setOver(false);
       }}
-      onDrop={(e) => {
-        e.preventDefault();
-        setOver(false);
-        handleFiles(e.dataTransfer.files);
-      }}
+      onDrop={handleDrop}
       className={cn(
-        "relative rounded-xl border border-dashed text-center transition",
+        "relative block rounded-xl border border-dashed text-center transition",
         compact ? "px-4 py-4 sm:text-left" : "px-6 py-10",
         disabled
           ? "cursor-not-allowed border-zinc-200 bg-zinc-50 opacity-60 dark:border-zinc-800 dark:bg-zinc-900"
@@ -70,16 +99,18 @@ export function UploadDragger({
       )}
     >
       <input
+        ref={inputRef}
+        id={inputId}
         type="file"
-        className="absolute inset-0 cursor-pointer opacity-0 disabled:cursor-not-allowed"
+        className="sr-only"
         accept={accept}
         multiple
         disabled={disabled}
-        onChange={(e) => handleFiles(e.target.files)}
+        onChange={(e) => handleFileList(e.target.files)}
       />
       <div
         className={cn(
-          "relative flex items-center justify-center gap-3",
+          "pointer-events-none relative flex items-center justify-center gap-3",
           compact && "sm:justify-start",
         )}
       >
@@ -96,6 +127,6 @@ export function UploadDragger({
           <p className="mt-0.5 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">{hint}</p>
         </div>
       </div>
-    </div>
+    </label>
   );
 }

@@ -16,6 +16,12 @@ import type { ColumnsType } from "antd/es/table";
 import { Send } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useToast } from "@/components/toast-provider";
+import {
+  DashboardPageHeader,
+  dashboardPageHeaderCtaClassName,
+  dashboardPageHeaderDescriptionClassName,
+  dashboardPageHeaderTitleClassName,
+} from "@/components/dashboard/dashboard-page-header";
 import { FormTextArea } from "@/components/ui/form-input";
 import { useFolderListSearch } from "@/components/photographer/photographer-shell";
 import type { ApiClient } from "@/lib/clients-api";
@@ -468,31 +474,19 @@ export default function SmsPage() {
 
   return (
     <div className="dashboard-page space-y-6">
-      <section className="relative overflow-hidden rounded-2xl border border-slate-800/50 bg-gradient-to-br from-slate-950 via-indigo-950/85 to-slate-900 shadow-lg shadow-slate-900/20">
-        <div
-          className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-brand/15 blur-3xl"
-          aria-hidden
-        />
-        <div className="relative flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-[1.65rem]">
-              SMS
-            </h1>
-            <p className="mt-2 max-w-xl text-sm leading-relaxed text-slate-400">
-              Text clients from your studio. Track delivery status and message costs from your
-              provider.
-            </p>
-          </div>
-          <button
-            type="button"
-            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white shadow-md transition hover:bg-brand-hover"
-            onClick={openSendModal}
-          >
-            <Send className="h-4 w-4" aria-hidden />
-            Send SMS
-          </button>
+      <DashboardPageHeader innerClassName="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <h1 className={dashboardPageHeaderTitleClassName()}>SMS</h1>
+          <p className={dashboardPageHeaderDescriptionClassName()}>
+            Text clients from your studio. Track delivery status and message costs from your
+            provider.
+          </p>
         </div>
-      </section>
+        <button type="button" className={dashboardPageHeaderCtaClassName()} onClick={openSendModal}>
+          <Send className="h-4 w-4" aria-hidden />
+          Send SMS
+        </button>
+      </DashboardPageHeader>
 
       {meta && !meta.configured ? (
         <Alert
@@ -702,7 +696,7 @@ export default function SmsPage() {
             onClick={() => void sendBroadcastSms()}
             loading={sending}
             disabled={!broadcastMessage.trim() || metaLoading}
-            className="!bg-[#2563EB] hover:!bg-[#1d4ed8]"
+            className="!bg-[#55001F] hover:!bg-[#440019]"
           >
             Send SMS
           </Button>

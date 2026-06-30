@@ -3,7 +3,13 @@
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Loader2 } from "lucide-react";
-import { getAuthToken } from "@/lib/auth-demo";
+import {
+  fetchAuthMe,
+  mapApiUserToAuthUser,
+  userNeedsEmailVerification,
+  verifyEmailPath,
+} from "@/lib/auth-api";
+import { consumeAuthHandoffFromUrl, getAuth, getAuthToken, setAuthSession } from "@/lib/auth-demo";
 import { cn } from "@/lib/utils";
 
 /** App Router paths; must match real `app/` routes (use pathname shape Next resolves). */
@@ -14,6 +20,7 @@ const PRIORITY_ROUTES = [
   "/dashboard/clients",
   "/dashboard/settings",
   "/dashboard/schedules",
+  "/dashboard/income",
   "/dashboard/communication",
   "/dashboard/uploads",
   "/dashboard/storage",
@@ -21,6 +28,7 @@ const PRIORITY_ROUTES = [
   "/dashboard/sms",
   "/dashboard/notifications",
   "/login",
+  "/verify-email",
   "/onboarding",
   "/reset-password",
 ];
@@ -28,12 +36,15 @@ const PRIORITY_ROUTES = [
 const PUBLIC_GALLERY_RESERVED_SEGMENTS = new Set([
   "dashboard",
   "login",
+  "verify-email",
   "onboarding",
   "reset-password",
   "share",
   "g",
   "api",
   "uploads",
+  "studio",
+  "client",
 ]);
 
 function isPublicGallerySlugPath(pathname: string): boolean {
@@ -46,20 +57,33 @@ function isPublicBootstrapPath(pathname: string): boolean {
   return (
     pathname === "/" ||
     pathname === "/login" ||
+    pathname === "/verify-email" ||
     pathname === "/onboarding" ||
     pathname === "/reset-password" ||
+    pathname === "/billing/callback" ||
+    pathname === "/studio" ||
     pathname.startsWith("/share/") ||
     pathname.startsWith("/g/") ||
+    pathname.startsWith("/client/") ||
     isPublicGallerySlugPath(pathname)
   );
 }
 
 async function runClientBootstrap(): Promise<void> {
-  // Storage is sync; this mainly yields the main thread after hydration / first paint.
-  // Extend here with validateSession() / GET /api/auth/me when you add it.
-  await new Promise<void>((resolve) => {
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-  });
+  consumeAuthHandoffFromUrl();
+
+  const token = getAuthToken()?.trim();
+  if (!token) return;
+
+  try {
+    const { user: apiUser } = await fetchAuthMe();
+    const auth = getAuth();
+    if (!auth) return;
+    const user = mapApiUserToAuthUser(apiUser);
+    setAuthSession({ ...auth, token, user });
+  } catch {
+    // 401 / network — authedFetch handles session expiry
+  }
 }
 
 export function AppBootstrap({ children }: { children: ReactNode }) {
@@ -72,13 +96,15 @@ export function AppBootstrap({ children }: { children: ReactNode }) {
   const [bootDone, setBootDone] = useState(publicPath);
 
   useEffect(() => {
+    let cancelled = false;
+
     if (publicPath || everBootedRef.current) {
+      void runClientBootstrap();
       everBootedRef.current = true;
       setBootDone(true);
       return;
     }
 
-    let cancelled = false;
     void (async () => {
       await runClientBootstrap();
       if (!cancelled) {
@@ -95,8 +121,18 @@ export function AppBootstrap({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!bootDone) return;
 
+    const auth = getAuth();
     const loggedIn = Boolean(getAuthToken());
-    if (!loggedIn) return;
+    if (!loggedIn || !auth?.user) return;
+
+    if (
+      userNeedsEmailVerification(auth.user) &&
+      !pathname.startsWith(verifyEmailPath()) &&
+      !pathname.startsWith("/login")
+    ) {
+      router.replace(verifyEmailPath());
+      return;
+    }
 
     const prefetch = () => {
       for (const base of PRIORITY_ROUTES) {

@@ -12,10 +12,12 @@ export function GalleryPreviewCard({
   folder,
   clientNameById,
   studioDefaultCoverUrl,
+  compact = false,
 }: {
   folder: ApiFolder;
   clientNameById?: Map<string, string>;
   studioDefaultCoverUrl?: string | null;
+  compact?: boolean;
 }) {
   const clientName = getFolderClientName(folder, clientNameById);
   const updated = folder.updatedAt ?? folder.createdAt;
@@ -32,26 +34,56 @@ export function GalleryPreviewCard({
   return (
     <Link
       href={`/dashboard/folder/${folder._id}`}
-      className="group flex flex-col overflow-hidden rounded-xl border border-zinc-200/80 bg-white shadow-[0_1px_3px_rgba(0,0,0,0.04)] ring-1 ring-zinc-900/[0.03] transition hover:-translate-y-0.5 hover:shadow-md hover:ring-zinc-900/[0.06] dark:border-zinc-800 dark:bg-zinc-950 dark:ring-white/[0.04]"
+      className={`group flex flex-col overflow-hidden border border-zinc-200/80 bg-white shadow-[0_1px_3px_rgba(0,0,0,0.04)] ring-1 ring-zinc-900/[0.03] transition hover:-translate-y-0.5 hover:shadow-md hover:ring-zinc-900/[0.06] dark:border-zinc-800 dark:bg-zinc-950 dark:ring-white/[0.04] ${
+        compact ? "rounded-lg" : "rounded-xl"
+      }`}
     >
-      <div className="relative aspect-[5/3] w-full overflow-hidden bg-zinc-100 dark:bg-zinc-800/50">
+      <div
+        className={`relative w-full overflow-hidden bg-zinc-100 dark:bg-zinc-800/50 ${
+          compact ? "aspect-[16/9]" : "aspect-[5/3]"
+        }`}
+      >
         <FolderCoverVisual
           folder={folder}
           studioDefaultCoverUrl={studioDefaultCoverUrl}
           imgClassName="h-full w-full object-cover transition duration-300 group-hover:scale-[1.03]"
         />
-        <div className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-lg bg-white/90 text-zinc-700 opacity-0 shadow-sm backdrop-blur-sm transition group-hover:opacity-100 dark:bg-zinc-900/90 dark:text-zinc-200">
-          <ArrowUpRight className="h-4 w-4" aria-hidden="true" />
+        <div
+          className={`absolute right-1.5 top-1.5 flex items-center justify-center rounded-md bg-white/90 text-zinc-700 opacity-0 shadow-sm backdrop-blur-sm transition group-hover:opacity-100 dark:bg-zinc-900/90 dark:text-zinc-200 ${
+            compact ? "h-6 w-6" : "right-2 top-2 h-8 w-8 rounded-lg"
+          }`}
+        >
+          <ArrowUpRight className={compact ? "h-3 w-3" : "h-4 w-4"} aria-hidden="true" />
         </div>
       </div>
-      <div className="flex flex-1 flex-col border-t border-zinc-100 p-3.5 dark:border-zinc-800/80">
-        <div className="flex items-start justify-between gap-2">
-          <p className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+      <div
+        className={`flex flex-1 flex-col border-t border-zinc-100 dark:border-zinc-800/80 ${
+          compact ? "p-2" : "p-3.5"
+        }`}
+      >
+        <div className="flex items-start justify-between gap-1.5">
+          <p
+            className={`min-w-0 flex-1 truncate font-semibold text-zinc-900 dark:text-zinc-50 ${
+              compact ? "text-xs" : "text-sm"
+            }`}
+          >
             {title}
           </p>
-          <p className="shrink-0 text-[11px] font-medium tabular-nums text-zinc-400">{dateLabel}</p>
+          <p
+            className={`shrink-0 font-medium tabular-nums text-zinc-400 ${
+              compact ? "text-[10px]" : "text-[11px]"
+            }`}
+          >
+            {dateLabel}
+          </p>
         </div>
-        <p className="mt-0.5 truncate text-xs text-zinc-500 dark:text-zinc-400">{sub}</p>
+        <p
+          className={`truncate text-zinc-500 dark:text-zinc-400 ${
+            compact ? "mt-0 text-[10px]" : "mt-0.5 text-xs"
+          }`}
+        >
+          {sub}
+        </p>
       </div>
     </Link>
   );

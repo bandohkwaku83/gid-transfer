@@ -7,23 +7,37 @@ const darkSkeleton =
   "[&_.ant-skeleton-content_.ant-skeleton-title]:rounded-md [&_.ant-skeleton-content_.ant-skeleton-paragraph>li]:rounded-md dark:[&_.ant-skeleton-content_.ant-skeleton-title]:!bg-zinc-700 dark:[&_.ant-skeleton-content_.ant-skeleton-paragraph>li]:!bg-zinc-700";
 
 /** Gallery card placeholder (dashboard + galleries grid). */
-export function GalleryCardSkeleton({ className }: { className?: string }) {
+export function GalleryCardSkeleton({
+  className,
+  compact = false,
+}: {
+  className?: string;
+  compact?: boolean;
+}) {
   return (
     <div
       className={cn(
-        "overflow-hidden rounded-xl border border-zinc-200/80 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950",
+        "overflow-hidden border border-zinc-200/80 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950",
+        compact ? "rounded-lg" : "rounded-xl",
         darkSkeleton,
         className,
       )}
     >
-      <div className="aspect-[5/3] w-full overflow-hidden">
+      <div className={cn("w-full overflow-hidden", compact ? "aspect-[4/3]" : "aspect-[5/3]")}>
         <Skeleton.Image
           active
-          className="!flex !h-full !min-h-[140px] !w-full !items-center !justify-center !rounded-none"
+          className={cn(
+            "!flex !h-full !w-full !items-center !justify-center !rounded-none",
+            compact ? "!min-h-[88px]" : "!min-h-[140px]",
+          )}
         />
       </div>
-      <div className="border-t border-zinc-100 p-4 dark:border-zinc-800">
-        <Skeleton active title={{ width: "68%" }} paragraph={{ rows: 2, width: ["52%", "36%"] }} />
+      <div className={cn("border-t border-zinc-100 dark:border-zinc-800", compact ? "space-y-1.5 p-2" : "p-4")}>
+        <Skeleton
+          active
+          title={{ width: "72%", style: compact ? { height: 12, marginTop: 0 } : undefined }}
+          paragraph={{ rows: compact ? 1 : 2, width: compact ? ["55%"] : ["52%", "36%"] }}
+        />
       </div>
     </div>
   );
@@ -161,18 +175,25 @@ export function InlineStatusSkeleton({ size = 16 }: { size?: number }) {
 /** Dashboard activity sidebar while data is loading. */
 export function ActivityFeedSkeleton({ rows = 5 }: { rows?: number }) {
   return (
-    <ul className={cn("mt-4 space-y-0", darkSkeleton)}>
-      {Array.from({ length: rows }).map((_, i) => (
-        <li
-          key={i}
-          className="flex gap-3 border-b border-zinc-100 py-3 last:border-0 dark:border-zinc-800/80"
-        >
-          <Skeleton.Avatar active size={32} shape="square" className="!rounded-lg" />
-          <div className="min-w-0 flex-1 pt-0.5">
-            <Skeleton active title={{ width: "78%" }} paragraph={{ rows: 1, width: "36%" }} />
-          </div>
-        </li>
-      ))}
-    </ul>
+    <div className={cn("mt-3 space-y-2", darkSkeleton)}>
+      <div className="flex items-center gap-2">
+        <TwShimmer className="h-3 w-12" />
+        <TwShimmer className="h-px flex-1" />
+      </div>
+      <ul className="space-y-0">
+        {Array.from({ length: rows }).map((_, i) => (
+          <li key={i} className="flex gap-2 rounded-lg p-1.5">
+            <TwShimmer className="h-8 w-8 shrink-0 rounded-lg" />
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex justify-between gap-2">
+                <TwShimmer className="h-3 w-[62%]" />
+                <TwShimmer className="h-3 w-8" />
+              </div>
+              <TwShimmer className="h-2.5 w-14 rounded" />
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

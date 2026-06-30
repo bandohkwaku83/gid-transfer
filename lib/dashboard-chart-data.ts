@@ -1,5 +1,3 @@
-import { apiFolderStatusToUi, type ApiFolder } from "@/lib/folders-api";
-
 export type PipelineSlice = {
   key: string;
   label: string;
@@ -21,45 +19,6 @@ export type StorageSlice = {
   color: string;
   darkColor: string;
 };
-
-export function computePipelineSlices(
-  folders: ApiFolder[],
-  dark: boolean,
-): PipelineSlice[] {
-  let draft = 0;
-  let selectionPending = 0;
-  let completed = 0;
-  for (const f of folders) {
-    const s = apiFolderStatusToUi(f.status);
-    if (s === "COMPLETED") completed += 1;
-    else if (s === "SELECTION_PENDING") selectionPending += 1;
-    else draft += 1;
-  }
-  const pick = (light: string, dk: string) => (dark ? dk : light);
-  return [
-    {
-      key: "draft",
-      label: "Draft",
-      value: draft,
-      color: pick("#94a3b8", "#64748b"),
-      darkColor: "#64748b",
-    },
-    {
-      key: "selection",
-      label: "Selection",
-      value: selectionPending,
-      color: pick("#f59e0b", "#fbbf24"),
-      darkColor: "#fbbf24",
-    },
-    {
-      key: "completed",
-      label: "Completed",
-      value: completed,
-      color: pick("#10b981", "#34d399"),
-      darkColor: "#34d399",
-    },
-  ].filter((s) => s.value > 0);
-}
 
 export function computeWeeklyActivity(
   timestamps: string[],
@@ -107,6 +66,49 @@ export function formatBytesShort(bytes: number): string {
   }
   const digits = n >= 100 || u === 0 ? 0 : n >= 10 ? 1 : 2;
   return `${n.toFixed(digits)} ${units[u]}`;
+}
+
+export function computeActivityDeltas(
+  timestamps: string[],
+  referenceIso?: string | null,
+): { todayDelta: number; weekDelta: number } {
+  const ref = referenceIso ? new Date(referenceIso) : new Date();
+  const end = new Date(ref);
+  end.setHours(23, 59, 59, 999);
+
+  const dayStart = new Date(end);
+  dayStart.setHours(0, 0, 0, 0);
+
+  const yesterdayEnd = new Date(dayStart);
+  yesterdayEnd.setMilliseconds(-1);
+  const yesterdayStart = new Date(yesterdayEnd);
+  yesterdayStart.setHours(0, 0, 0, 0);
+
+  const weekStart = new Date(end);
+  weekStart.setDate(weekStart.getDate() - 6);
+  weekStart.setHours(0, 0, 0, 0);
+
+  const prevWeekEnd = new Date(weekStart);
+  prevWeekEnd.setMilliseconds(-1);
+  const prevWeekStart = new Date(prevWeekEnd);
+  prevWeekStart.setDate(prevWeekStart.getDate() - 6);
+  prevWeekStart.setHours(0, 0, 0, 0);
+
+  const countInRange = (start: number, finish: number) =>
+    timestamps.filter((iso) => {
+      const t = new Date(iso).getTime();
+      return Number.isFinite(t) && t >= start && t <= finish;
+    }).length;
+
+  const today = countInRange(dayStart.getTime(), end.getTime());
+  const yesterday = countInRange(yesterdayStart.getTime(), yesterdayEnd.getTime());
+  const thisWeek = countInRange(weekStart.getTime(), end.getTime());
+  const lastWeek = countInRange(prevWeekStart.getTime(), prevWeekEnd.getTime());
+
+  return {
+    todayDelta: today - yesterday,
+    weekDelta: thisWeek - lastWeek,
+  };
 }
 
 export function storageSlicesFromUsage(

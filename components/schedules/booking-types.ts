@@ -33,10 +33,15 @@ export type BookedShoot = {
   startTime: string;
   endTime?: string;
   location?: string;
-  kind: ShootKind;
-  /** API-only notes field. */
-  description?: string;
-  /** API legend color key (`red`, `sky`, …) for dots when present. */
+  /** Shoot category id from GET /api/bookings/meta (e.g. `wedding`). */
+  shootCategory: string;
+  /** Display label (e.g. "Wedding"). */
+  shootTypeLabel: string;
+  notes?: string;
+  currency?: string;
+  /** Fee charged for this booking, when > 0. */
+  amountCharged?: number;
+  /** API color key (`red`, `sky`, …) for calendar dots and chips. */
   shootColor?: string;
 };
 

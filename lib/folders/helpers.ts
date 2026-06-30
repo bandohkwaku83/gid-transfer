@@ -24,6 +24,11 @@ export function isRestoreDeadlinePassed(restoreBefore: string): boolean {
   return d.getTime() < Date.now();
 }
 
+/** Trash rows past their restore window are permanently removed — not shown in the UI. */
+export function filterRestorableTrash<T extends { restoreBefore: string }>(rows: T[]): T[] {
+  return rows.filter((row) => !isRestoreDeadlinePassed(row.restoreBefore));
+}
+
 /** Label for client share gallery selection UI (e.g. `3/10` or `3`). */
 export function formatClientSelectionCount(
   selectedCount: number,
@@ -160,6 +165,78 @@ export function extractFinalMediaList(folder: ApiFolder): ApiFolderMedia[] {
   return [];
 }
 
+export function folderMediaRowId(m: ApiFolderMedia): string {
+  return (m._id || m.id || "").trim();
+}
+
+/** Reorder a full id list after a drag within a filtered visible subset. */
+export function reorderMediaIds(
+  allIds: string[],
+  visibleIds: string[],
+  fromIndex: number,
+  toIndex: number,
+): string[] {
+  if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return allIds;
+  const reorderedVisible = [...visibleIds];
+  const [moved] = reorderedVisible.splice(fromIndex, 1);
+  if (!moved) return allIds;
+  reorderedVisible.splice(toIndex, 0, moved);
+  const visibleSet = new Set(visibleIds);
+  let vi = 0;
+  return allIds.map((id) => (visibleSet.has(id) ? reorderedVisible[vi++]! : id));
+}
+
+export function reorderApiFolderMedia(
+  items: ApiFolderMedia[],
+  orderedIds: string[],
+): ApiFolderMedia[] {
+  const byId = new Map<string, ApiFolderMedia>();
+  for (const row of items) {
+    const id = folderMediaRowId(row);
+    if (id) byId.set(id, row);
+  }
+  const used = new Set<string>();
+  const next: ApiFolderMedia[] = [];
+  for (const id of orderedIds) {
+    const row = byId.get(id);
+    if (row) {
+      next.push(row);
+      used.add(id);
+    }
+  }
+  for (const row of items) {
+    const id = folderMediaRowId(row);
+    if (id && !used.has(id)) next.push(row);
+  }
+  return next;
+}
+
+/** Apply a saved id order to any list of rows with `id`. */
+export function applyOrderByIds<T extends { id: string }>(items: T[], orderedIds: string[]): T[] {
+  if (orderedIds.length === 0) return items;
+  const byId = new Map(items.map((row) => [row.id, row]));
+  const used = new Set<string>();
+  const next: T[] = [];
+  for (const id of orderedIds) {
+    const row = byId.get(id);
+    if (row) {
+      next.push(row);
+      used.add(id);
+    }
+  }
+  for (const row of items) {
+    if (!used.has(row.id)) next.push(row);
+  }
+  return next;
+}
+
+/** Merge a reordered visible subset back into the full id list. */
+export function mergeVisibleOrder(allIds: string[], visibleOrderedIds: string[]): string[] {
+  const visibleSet = new Set(visibleOrderedIds);
+  let vi = 0;
+  return allIds.map((id) => (visibleSet.has(id) ? visibleOrderedIds[vi++]! : id));
+}
+
 /** Display filename for a folder media row (aligned with gallery / duplicate checks). */
 export function folderMediaRowFilename(m: ApiFolderMedia): string {
   return (m.originalName || m.originalFilename || m.filename || m.name || "").trim();
@@ -199,26 +276,35 @@ function apiEditStatusToUi(s?: string): "NONE" | "IN_PROGRESS" | "EDITED" {
   return "NONE";
 }
 
+/** Photographer dashboard grid — prefer thumb, fall back to full image while processing. */
+export function demoAssetGridSrc(asset: Pick<DemoAsset, "thumbUrl" | "url">): string {
+  return asset.thumbUrl?.trim() || asset.url?.trim() || "";
+}
+
 /** Map API media row → in-app DemoAsset shape for folder detail UI. */
 export function apiFolderMediaToDemoAsset(m: ApiFolderMedia): DemoAsset {
-  const id = m._id || m.id || `m-${Math.random().toString(36).slice(2, 10)}`;
+  const id =
+    (typeof m.rawMediaId === "string" && m.rawMediaId.trim()) ||
+    m._id ||
+    m.id ||
+    `m-${Math.random().toString(36).slice(2, 10)}`;
   const originalName =
     m.originalName || m.originalFilename || m.filename || m.name || "Photo";
   const smallThumb = m.thumbUrl || m.thumbnailUrl || "";
-  const largePreview =
-    m.displayUrl || m.url || m.previewUrl || m.image || "";
-  const thumbRaw = smallThumb || largePreview;
-  const thumbUrl = resolveCoverUrl(thumbRaw) || thumbRaw || "";
-  const largeResolved = largePreview ? resolveCoverUrl(largePreview) : "";
+  const fullUrl = m.url || "";
+  const largePreview = m.displayUrl || fullUrl || m.previewUrl || m.image || "";
+  const thumbResolved = smallThumb ? resolveCoverUrl(smallThumb) || smallThumb : "";
+  const largeResolved = largePreview ? resolveCoverUrl(largePreview) || largePreview : "";
+  const resolvedUrl = fullUrl ? resolveCoverUrl(fullUrl) || fullUrl : largeResolved;
   const mimeType = (m.mimeType || m.contentType || m.content_type || "").toLowerCase();
   const isVideo =
     m.isVideo === true ||
     mimeType.startsWith("video/") ||
     /\.(mp4|mov|webm|m4v|avi|mkv|ogv)$/i.test(originalName);
-  const mediaUrl = largeResolved || thumbUrl;
+  const mediaUrl = largeResolved || thumbResolved || resolvedUrl;
   const previewUrl = isVideo
     ? mediaUrl
-    : largeResolved && largeResolved !== thumbUrl
+    : largeResolved && thumbResolved && largeResolved !== thumbResolved
       ? largeResolved
       : undefined;
   const selected =
@@ -245,8 +331,11 @@ export function apiFolderMediaToDemoAsset(m: ApiFolderMedia): DemoAsset {
       (typeof (m as Record<string, unknown>).selected_at === "string"
         ? ((m as Record<string, unknown>).selected_at as string)
         : null),
-    thumbUrl: isVideo ? mediaUrl : thumbUrl,
+    thumbUrl: isVideo ? mediaUrl : thumbResolved,
+    url: isVideo ? mediaUrl : resolvedUrl,
     ...(previewUrl ? { previewUrl } : {}),
+    ...(m.displayUrl ? { displayUrl: resolveCoverUrl(m.displayUrl) || m.displayUrl } : {}),
+    ...(m.derivativesReady === false ? { derivativesReady: false } : {}),
     ...(isVideo ? { isVideo: true } : {}),
     setId,
   };
@@ -398,6 +487,8 @@ export function apiFolderStatusToUi(s?: string): FolderStatus {
   return "DRAFT";
 }
 
+export const UNKNOWN_CLIENT_LABEL = "Unknown client";
+
 export function getFolderClientId(folder: ApiFolder): string {
   return typeof folder.client === "string" ? folder.client : folder.client?._id ?? "";
 }
@@ -406,11 +497,49 @@ export function getFolderClientName(
   folder: ApiFolder,
   clientNameById?: Map<string, string>,
 ): string {
-  if (typeof folder.client === "object" && folder.client?.name) {
-    return folder.client.name;
-  }
   const id = getFolderClientId(folder);
-  return clientNameById?.get(id) ?? "Unknown client";
+  const fromMap = id ? clientNameById?.get(id)?.trim() : undefined;
+  if (fromMap) return fromMap;
+
+  if (typeof folder.client === "object" && folder.client?.name) {
+    const embedded = folder.client.name.trim();
+    if (embedded && embedded !== UNKNOWN_CLIENT_LABEL) {
+      return embedded;
+    }
+  }
+
+  return UNKNOWN_CLIENT_LABEL;
+}
+
+export function enrichFolderClientNames(
+  folders: ApiFolder[],
+  clientNameById?: Map<string, string>,
+): ApiFolder[] {
+  return folders.map((folder) => {
+    const name = getFolderClientName(folder, clientNameById);
+    if (typeof folder.client === "object") {
+      if (folder.client.name === name) return folder;
+      return { ...folder, client: { ...folder.client, name } };
+    }
+    const id = getFolderClientId(folder);
+    return {
+      ...folder,
+      client: {
+        _id: id || "unknown",
+        name,
+        email: "",
+        contact: "",
+        location: "",
+      },
+    };
+  });
+}
+
+export function getFolderClientContact(folder: ApiFolder): string {
+  if (typeof folder.client === "object") {
+    return folder.client.contact?.trim() || folder.client.email?.trim() || "";
+  }
+  return "";
 }
 
 /** Selection lock may be on `share` (detail GET) or duplicated on the folder root. */
@@ -440,9 +569,22 @@ export function resolveCoverUrl(coverImage?: string | null): string | null {
   return `/${normalized}`;
 }
 
-/** Pick the best cover URL for an ApiFolder (prefers `coverImageUrl`). */
+/** Pick the best cover URL for an ApiFolder (prefers full cover, then display variants). */
 export function getFolderCoverUrl(folder: ApiFolder): string | null {
-  if (folder.coverImageUrl) return resolveCoverUrl(folder.coverImageUrl);
+  if (folder.coverImageUrl) {
+    const resolved = resolveCoverUrl(folder.coverImageUrl);
+    if (resolved) return resolved;
+  }
+  const o = folder as Record<string, unknown>;
+  const displayUrl = firstNonEmptyCoverRef(
+    o.displayCoverUrl,
+    o.display_cover_url,
+    o.effectiveCoverUrl,
+    o.effective_cover_url,
+    o.resolvedCoverUrl,
+    o.resolved_cover_url,
+  );
+  if (displayUrl) return resolveCoverUrl(displayUrl);
   return resolveCoverUrl(folder.coverImage);
 }
 
@@ -458,17 +600,6 @@ export function resolveFolderCoverSrc(
   folder: ApiFolder,
   studioDefaultCoverUrl?: string | null,
 ): string | null {
-  const o = folder as Record<string, unknown>;
-  const displayUrl = firstNonEmptyCoverRef(
-    o.displayCoverUrl,
-    o.display_cover_url,
-    o.effectiveCoverUrl,
-    o.effective_cover_url,
-    o.resolvedCoverUrl,
-    o.resolved_cover_url,
-  );
-  if (displayUrl) return resolveCoverUrl(displayUrl);
-
   const usesDefault = folder.usingDefaultCover !== false;
   if (usesDefault) {
     const studio = studioDefaultCoverUrl?.trim();
@@ -531,7 +662,7 @@ function pathFromShareUrlField(shareUrl: string): string | null {
   }
 }
 
-/** Client gallery lives at `/g/[token]` (see `app/g/[token]/page.tsx`). */
+/** Client gallery lives at `/g/[token]`, `/[companySlug]/[gallerySlug]`, or `/client/[slug]` on tenant hosts. */
 function pathToClientGalleryPath(pathWithSearch: string): string | null {
   const hashIdx = pathWithSearch.indexOf("#");
   const noHash = hashIdx >= 0 ? pathWithSearch.slice(0, hashIdx) : pathWithSearch;
@@ -556,21 +687,74 @@ function pathToClientGalleryPath(pathWithSearch: string): string | null {
   const gM = pathname.match(/^\/g\/(.+)$/);
   if (gM) return trySegment(gM[1]);
 
+  const clientM = pathname.match(/^\/client\/([^/]+)$/);
+  if (clientM?.[1]) {
+    return `/client/${encodeURIComponent(clientM[1])}${search}`;
+  }
+
+  const slugM = pathname.match(/^\/([^/]+)\/([^/]+)$/);
+  if (slugM?.[1] && slugM[2]) {
+    return `/${encodeURIComponent(slugM[1])}/${encodeURIComponent(slugM[2])}${search}`;
+  }
+
   return null;
 }
 
+/** True when the gallery has an uploaded custom cover (not the studio default). */
+export function galleryHasCustomCoverImage(folder: ApiFolder): boolean {
+  if (folder.usingDefaultCover !== false) return false;
+  return Boolean(getFolderCoverUrl(folder));
+}
+
+/** True when cover style/design settings were saved for this gallery. */
+export function galleryHasSavedCoverStyle(folder: ApiFolder): boolean {
+  return folder.coverStyleConfigured === true;
+}
+
+/** Whether the photographer may activate the client share link. */
+export function canActivateGalleryOnline(folder: ApiFolder): boolean {
+  return galleryHasCustomCoverImage(folder) && galleryHasSavedCoverStyle(folder);
+}
+
+/** Hint shown on the offline publish toggle before requirements are met. */
+export function galleryOnlineActivationHint(folder: ApiFolder): string {
+  const hasCover = galleryHasCustomCoverImage(folder);
+  const hasStyle = galleryHasSavedCoverStyle(folder);
+  if (!hasCover && !hasStyle) {
+    return "Upload a cover photo and choose a cover style in the Gallery tab before going online.";
+  }
+  if (!hasCover) {
+    return "Upload a cover photo in the Gallery tab before going online.";
+  }
+  if (!hasStyle) {
+    return "Choose a cover style in the Gallery tab before going online.";
+  }
+  return "Turn on to publish the client link.";
+}
+
+/** Client link is published (online) — share enabled, not expired, and has a share token or URL. */
+export function isGalleryPublished(folder: ApiFolder): boolean {
+  if (folder.shareExpired) return false;
+  if (folder.share?.enabled !== true) return false;
+  return Boolean(folder.shareUrl || folder.share?.code || folder.share?.slug);
+}
+
 /**
- * Relative client-gallery path on this app (`/g/:token`).
- * Re-homes API URLs that used `/share/...` to `/g/...` so links match Next routes.
+ * Relative client-gallery path on this app.
+ * Prefers API `shareUrl` (slug or tenant `/client/...` format), then token fallback.
  */
 export function getFolderSharePath(folder: ApiFolder): string | null {
-  const code = folder.share?.slug ?? folder.share?.code;
-  if (code) return `/g/${encodeURIComponent(code)}`;
   if (folder.shareUrl) {
     const raw = pathFromShareUrlField(folder.shareUrl);
-    if (!raw) return null;
-    return pathToClientGalleryPath(raw);
+    if (raw) {
+      const normalized = pathToClientGalleryPath(raw);
+      if (normalized) return normalized;
+      if (raw.startsWith("/")) return raw;
+    }
   }
+
+  const code = folder.share?.slug ?? folder.share?.code;
+  if (code) return `/g/${encodeURIComponent(code)}`;
   return null;
 }
 

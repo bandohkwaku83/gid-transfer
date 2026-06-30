@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { SettingsShell } from "@/components/settings/settings-shell";
 import {
@@ -14,19 +14,23 @@ import {
 import { useToast } from "@/components/toast-provider";
 import { getAuth } from "@/lib/auth-demo";
 import {
-  getSettings,
+  fetchSettingsPageData,
+  fetchSettingsTabData,
   updateSettings,
   type ApiSettings,
+  type SettingsPageData,
 } from "@/lib/settings-api";
 import {
-  PLANS,
-  countGalleriesTowardQuota,
-  getSubscriptionPlanIdForEmail,
-  setSubscriptionPlanIdForEmail,
-  type PlanId,
-} from "@/lib/subscription-plan";
+  SETTINGS_PREREQUISITE_FOCUS,
+  isSafeDashboardReturnTo,
+} from "@/lib/settings-prerequisite";
 import { isSettingsTabId, type SettingsTabId } from "@/lib/settings-tabs";
 import { PRODUCT_TAGLINE } from "@/lib/branding";
+import {
+  DashboardPageHeader,
+  dashboardPageHeaderDescriptionClassName,
+  dashboardPageHeaderTitleClassName,
+} from "@/components/dashboard/dashboard-page-header";
 
 function SettingsPageContent() {
   const { showToast } = useToast();
@@ -39,34 +43,45 @@ function SettingsPageContent() {
   }, [authVersion]);
 
   const tabParam = searchParams.get("tab");
+  const returnToParam = searchParams.get("returnTo");
+  const focusParam = searchParams.get("focus");
+  const returnTo =
+    returnToParam && isSafeDashboardReturnTo(returnToParam) ? returnToParam : null;
   const activeTab: SettingsTabId = isSettingsTabId(tabParam) ? tabParam : "profile";
 
   const [settings, setSettings] = useState<ApiSettings | null>(null);
+  const [pageData, setPageData] = useState<SettingsPageData | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [savingWatermark, setSavingWatermark] = useState(false);
   const [uploadingCover, setUploadingCover] = useState(false);
+  const [removingCover, setRemovingCover] = useState(false);
   const authEmail = (auth?.user?.email ?? auth?.email ?? "").trim();
-  const [planId, setPlanId] = useState<PlanId>("free");
   const [siteOrigin, setSiteOrigin] = useState("");
+  const [billingSuccess, setBillingSuccess] = useState(false);
+  const pageDataRef = useRef<SettingsPageData | null>(null);
+
+  useEffect(() => {
+    pageDataRef.current = pageData;
+  }, [pageData]);
 
   useEffect(() => {
     setSiteOrigin(window.location.origin);
   }, []);
 
   useEffect(() => {
-    if (!authEmail) {
-      setPlanId("free");
-      return;
+    if (searchParams.get("success") === "1" && activeTab === "billing") {
+      setBillingSuccess(true);
     }
-    setPlanId(getSubscriptionPlanIdForEmail(authEmail));
-  }, [authEmail]);
+  }, [searchParams, activeTab]);
 
   const load = useCallback(async () => {
     setLoadError(null);
     try {
-      const data = await getSettings();
-      setSettings(data);
+      const data = await fetchSettingsPageData();
+      setPageData(data);
+      setSettings(data.flat);
+      setAuthVersion((v) => v + 1);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "Could not load settings.");
     } finally {
@@ -78,9 +93,60 @@ function SettingsPageContent() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (loading || activeTab === "profile" || activeTab === "refer" || activeTab === "support") {
+      return;
+    }
+
+    const tabKey =
+      activeTab === "billing"
+        ? "billing"
+        : activeTab === "gallery"
+          ? "gallery"
+          : "watermark";
+
+    void (async () => {
+      try {
+        const data = await fetchSettingsTabData(tabKey, pageDataRef.current);
+        setPageData(data);
+        setSettings(data.flat);
+        if (tabKey === "gallery" || tabKey === "watermark") {
+          setAuthVersion((v) => v + 1);
+        }
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : "Could not load settings.", "error");
+      }
+    })();
+  }, [activeTab, loading, showToast]);
+
+  function applyPageData(data: SettingsPageData) {
+    setPageData(data);
+    setSettings(data.flat);
+    setAuthVersion((v) => v + 1);
+  }
+
   function setTab(tab: SettingsTabId) {
     router.replace(`/dashboard/settings?tab=${tab}`, { scroll: false });
   }
+
+  useEffect(() => {
+    if (loading) return;
+    const focusId =
+      focusParam === SETTINGS_PREREQUISITE_FOCUS.watermarkPreview
+        ? "settings-watermark-preview"
+        : focusParam === SETTINGS_PREREQUISITE_FOCUS.brandWatermark
+          ? "settings-brand-watermark"
+          : null;
+    if (!focusId) return;
+    requestAnimationFrame(() => {
+      document.getElementById(focusId)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }, [focusParam, loading]);
+
+  const returnAfterPrerequisite = useCallback(() => {
+    if (!returnTo) return;
+    router.push(returnTo);
+  }, [returnTo, router]);
 
   async function onWatermarkChange(next: boolean) {
     if (!settings || savingWatermark) return;
@@ -88,7 +154,12 @@ function SettingsPageContent() {
     try {
       const data = await updateSettings({ watermarkPreviewImages: next });
       setSettings(data);
+      const refreshed = await fetchSettingsTabData("gallery", pageDataRef.current);
+      applyPageData(refreshed);
       showToast("Settings saved.", "success");
+      if (next && returnTo && focusParam === SETTINGS_PREREQUISITE_FOCUS.watermarkPreview) {
+        returnAfterPrerequisite();
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Failed to save.", "error");
     } finally {
@@ -104,11 +175,10 @@ function SettingsPageContent() {
     }
     setUploadingCover(true);
     try {
-      const data = await updateSettings({
-        defaultCoverImage: file,
-        watermarkPreviewImages: settings?.watermarkPreviewImages,
-      });
+      const data = await updateSettings({ defaultCoverImage: file });
       setSettings(data);
+      const refreshed = await fetchSettingsTabData("gallery", pageDataRef.current);
+      applyPageData(refreshed);
       showToast("Default cover updated.", "success");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Failed to upload cover.", "error");
@@ -117,18 +187,30 @@ function SettingsPageContent() {
     }
   }
 
-  function selectPlan(id: PlanId) {
-    if (!authEmail) {
-      showToast("Sign in to change plans.", "error");
-      return;
+  async function onCoverRemove() {
+    if (!settings || removingCover || uploadingCover) return;
+    setRemovingCover(true);
+    try {
+      const data = await updateSettings({ defaultCoverImage: null });
+      setSettings(data);
+      const refreshed = await fetchSettingsTabData("gallery", pageDataRef.current);
+      applyPageData(refreshed);
+      showToast("Default cover removed.", "success");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Failed to remove cover.", "error");
+    } finally {
+      setRemovingCover(false);
     }
-    setSubscriptionPlanIdForEmail(authEmail, id);
-    setPlanId(id);
-    showToast(
-      id === "free" ? "Free plan selected (demo)." : `${PLANS[id].label} plan selected (demo).`,
-      "success",
-    );
   }
+
+  const refreshBillingContext = useCallback(async () => {
+    try {
+      const data = await fetchSettingsTabData("billing", pageDataRef.current);
+      applyPageData(data);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not refresh billing.", "error");
+    }
+  }, [showToast]);
 
   function copyReferralLink() {
     if (!authEmail) {
@@ -148,36 +230,58 @@ function SettingsPageContent() {
         return (
           <SettingsProfileSection
             auth={auth}
-            planId={planId}
+            pageData={pageData}
+            loading={loading}
             onTabChange={setTab}
-            onProfileUpdated={() => setAuthVersion((v) => v + 1)}
+            onProfileUpdated={applyPageData}
           />
         );
       case "billing":
         return (
           <SettingsBillingSection
-            planId={planId}
-            galleriesUsed={countGalleriesTowardQuota()}
-            onSelectPlan={selectPlan}
+            overview={pageData?.bundle.overview ?? null}
+            loading={loading}
+            paymentSuccess={billingSuccess}
+            onPaymentSuccessAcknowledged={() => {
+              setBillingSuccess(false);
+              router.replace("/dashboard/settings?tab=billing", { scroll: false });
+            }}
+            onBillingUpdated={refreshBillingContext}
           />
         );
       case "watermark":
         return (
           <SettingsWatermarkSection
-            settings={settings}
+            initialWatermark={settings?.brandWatermark}
             loading={loading}
-            onSaved={setSettings}
+            onSaved={(brandWatermark) => {
+              setSettings((cur) => (cur ? { ...cur, brandWatermark } : cur));
+              if (
+                brandWatermark.enabled &&
+                returnTo &&
+                focusParam === SETTINGS_PREREQUISITE_FOCUS.brandWatermark
+              ) {
+                returnAfterPrerequisite();
+              }
+            }}
+            returnTo={returnTo}
           />
         );
       case "gallery":
         return (
           <SettingsGallerySection
             settings={settings}
+            watermarkPreviewHint={
+              pageData?.bundle.galleryDefaults.watermarkPreview?.description
+            }
             loading={loading}
             savingWatermark={savingWatermark}
             uploadingCover={uploadingCover}
+            removingCover={removingCover}
             onWatermarkChange={(n) => void onWatermarkChange(n)}
             onCoverUpload={(f) => void onCoverImageUpload(f)}
+            onCoverRemove={() => void onCoverRemove()}
+            returnTo={returnTo}
           />
         );
       case "refer":
@@ -189,7 +293,7 @@ function SettingsPageContent() {
           />
         );
       case "support":
-        return <SettingsSupportSection auth={auth} planId={planId} />;
+        return <SettingsSupportSection auth={auth} />;
       default:
         return null;
     }
@@ -197,18 +301,10 @@ function SettingsPageContent() {
 
   return (
     <div className="dashboard-page space-y-6">
-      <section className="relative overflow-hidden rounded-2xl border border-slate-800/50 bg-gradient-to-br from-slate-950 via-indigo-950/85 to-slate-900 shadow-lg shadow-slate-900/20">
-        <div
-          className="pointer-events-none absolute -right-12 -top-12 h-40 w-40 rounded-full bg-brand/15 blur-3xl"
-          aria-hidden
-        />
-        <div className="relative p-5 sm:p-6">
-          <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-[1.65rem]">
-            Settings
-          </h1>
-          <p className="mt-1.5 max-w-xl text-sm text-slate-400">{PRODUCT_TAGLINE}</p>
-        </div>
-      </section>
+      <DashboardPageHeader>
+        <h1 className={dashboardPageHeaderTitleClassName()}>Settings</h1>
+        <p className={dashboardPageHeaderDescriptionClassName("mt-1.5")}>{PRODUCT_TAGLINE}</p>
+      </DashboardPageHeader>
 
       {loadError ? (
         <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
@@ -226,7 +322,25 @@ function SettingsPageContent() {
         </div>
       ) : null}
 
-      <SettingsShell activeTab={activeTab} onTabChange={setTab}>
+      {returnTo ? (
+        <div className="rounded-2xl border border-amber-200/90 bg-amber-50/80 px-4 py-3 text-sm text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100">
+          <p>
+            {focusParam === SETTINGS_PREREQUISITE_FOCUS.brandWatermark
+              ? "Turn on your brand watermark below and save — you'll return to your gallery automatically. You can also "
+              : "Turn on the setting below — you'll return to your gallery automatically. You can also "}
+            <button
+              type="button"
+              onClick={returnAfterPrerequisite}
+              className="font-semibold text-brand underline underline-offset-2 hover:text-brand-hover dark:text-brand-on-dark"
+            >
+              go back now
+            </button>
+            .
+          </p>
+        </div>
+      ) : null}
+
+      <SettingsShell activeTab={activeTab}>
         {renderPanel()}
       </SettingsShell>
     </div>

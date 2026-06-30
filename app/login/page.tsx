@@ -2,75 +2,77 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
-import { useToast } from "@/components/toast-provider";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { ArrowLeft } from "lucide-react";
 import {
   AuthApiError,
-  authRedirectPath,
+  navigateAfterAuth,
   forgotPassword,
   loginWithEmail,
   loginWithGoogle,
   persistAuthResponse,
   registerWithEmail,
+  userNeedsEmailVerification,
+  verifyEmailPath,
 } from "@/lib/auth-api";
+import { getAuth, getAuthToken, clearAuth } from "@/lib/auth-demo";
 import { getGoogleClientId, requestGoogleIdToken } from "@/lib/google-identity";
 import { AuthFormInput, AuthFormPasswordInput } from "@/components/ui/form-input";
+import { redirectToApexAuthIfNeeded } from "@/lib/studio-url";
+import { APP_NAME, PRODUCT_TAGLINE } from "@/lib/branding";
 import { cn } from "@/lib/utils";
 
-type Provider = "google" | "apple";
 type AuthScreen = "signin" | "signup" | "forgot";
 
-// Carousel slides — each one previews a different part of the studio so visitors
-// understand the breadth of what they're signing up to. Photos act as backdrops
-// for the eyebrow/title/body overlay.
 const slides = [
   {
-    image:
-      "https://images.unsplash.com/photo-1519741497674-611481863552?auto=format&fit=crop&w=1400&q=80",
-    alt: "Wedding ceremony aisle in soft light",
-    eyebrow: "Client Galleries",
-    title: "Magazine-grade delivery",
-    body: "Brandable galleries with lightbox, favourites, and selection. Your work, presented the way you want.",
+    image: "/images/login_image.png",
+    alt: "Laptop mockup showing galleries, bookings, and calendar in the photographer dashboard",
+    eyebrow: "Studio Dashboard",
+    title: "Everything in one place",
+    body: "Galleries, bookings, and your calendar — manage client work from a single workspace built for photographers.",
+    imageClassName: "object-contain object-center bg-zinc-900",
   },
   {
-    image:
-      "https://images.unsplash.com/photo-1502920917128-1aa500764cbd?auto=format&fit=crop&w=1400&q=80",
+    image: "/images/gallery-covers/IMG_5261.JPG",
     alt: "Couple reviewing photos together",
     eyebrow: "Selection & Proofing",
     title: "Approvals in one sitting",
     body: "Heart-rating, per-image comments, and a guided wizard so clients pick favourites before the next coffee.",
   },
   {
-    image:
-      "https://images.unsplash.com/photo-1502635385003-ee1e6a1a742d?auto=format&fit=crop&w=1400&q=80",
+    image: "/images/gallery-covers/website_3-min.jpg",
     alt: "Studio portrait under warm light",
     eyebrow: "Brand & Portfolio",
     title: "Unmistakably your studio",
     body: "Custom domain, brand kit, and fonts on every page. No generic upload link, no “Powered by” footer.",
   },
   {
-    image:
-      "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=1400&q=80",
+    image: "/images/gallery-covers/IMG_5566.JPG",
     alt: "Bridal celebration at golden hour",
     eyebrow: "Smart Delivery",
     title: "Finals on your terms",
     body: "Share-link galleries with watermarked previews and pay-to-unlock finals. You control what clients can download.",
   },
   {
-    image:
-      "https://images.unsplash.com/photo-1452587925148-ce544e77e70d?auto=format&fit=crop&w=1400&q=80",
+    image: "/images/gallery-covers/WOED0075.JPG",
     alt: "Photographer working a wedding ceremony",
     eyebrow: "Studio CRM",
     title: "Bookings to finals on autopilot",
     body: "Quotes, contracts, invoices, and reminders in one dashboard. Keep admin work in one place while you shoot.",
   },
-] as const;
+] as const satisfies ReadonlyArray<{
+  image: string;
+  alt: string;
+  eyebrow: string;
+  title: string;
+  body: string;
+  imageClassName?: string;
+}>;
 
 const SLIDE_INTERVAL_MS = 5500;
 
-// Inline brand marks — we render them with their native colours/silhouettes so the
-// "Sign up with …" buttons look familiar instead of using a generic icon set.
 function GoogleMark({ className }: { className?: string }) {
   return (
     <svg
@@ -99,38 +101,84 @@ function GoogleMark({ className }: { className?: string }) {
   );
 }
 
-function AppleMark({ className }: { className?: string }) {
+function screenFromSearchParams(searchParams: URLSearchParams): AuthScreen {
+  return searchParams.get("screen") === "signup" ? "signup" : "signin";
+}
+
+function AuthTab({
+  active,
+  children,
+  onClick,
+  disabled,
+}: {
+  active: boolean;
+  children: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
   return (
-    <svg
-      viewBox="0 0 24 24"
-      aria-hidden
-      xmlns="http://www.w3.org/2000/svg"
-      className={className}
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "flex-1 rounded-full px-2.5 py-2.5 text-xs font-semibold transition sm:px-4 sm:py-2 sm:text-sm",
+        active
+          ? "bg-white text-zinc-900 shadow-sm ring-1 ring-zinc-200/80"
+          : "text-zinc-500 hover:text-zinc-800",
+        disabled && "cursor-not-allowed opacity-50",
+      )}
     >
-      <path
-        d="M17.05 12.04c-.03-3.13 2.55-4.62 2.67-4.7-1.45-2.13-3.71-2.42-4.51-2.45-1.92-.2-3.74 1.13-4.71 1.13-.97 0-2.46-1.1-4.05-1.07-2.08.03-4.02 1.21-5.09 3.07-2.17 3.76-.55 9.32 1.56 12.37 1.04 1.5 2.27 3.18 3.88 3.12 1.56-.06 2.15-1.01 4.04-1.01 1.89 0 2.42 1.01 4.06.98 1.68-.03 2.74-1.51 3.77-3.02 1.19-1.74 1.68-3.42 1.7-3.51-.04-.02-3.27-1.25-3.32-4.97zM13.96 2.92C14.81 1.89 15.39.46 15.23-.97c-1.23.05-2.72.82-3.61 1.85-.79.92-1.49 2.4-1.3 3.79 1.37.11 2.78-.69 3.64-1.75z"
-        fill="currentColor"
-      />
-    </svg>
+      {children}
+    </button>
   );
 }
 
-export default function SignUpPage() {
+function LoginPageForm() {
   const router = useRouter();
-  const { showToast } = useToast();
-  const [screen, setScreen] = useState<AuthScreen>("signin");
+  const searchParams = useSearchParams();
+  const [screen, setScreen] = useState<AuthScreen>(() =>
+    screenFromSearchParams(searchParams),
+  );
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [agreed, setAgreed] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [providerLoading, setProviderLoading] = useState<Provider | null>(null);
+  const [googleLoading, setGoogleLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [forgotSuccess, setForgotSuccess] = useState<string | null>(null);
 
-  // Carousel state — auto-advances, but pauses if the user hovers the panel or
-  // jumps to a specific slide via the dots, then resumes after a short idle.
   const [slideIndex, setSlideIndex] = useState(0);
   const carouselPausedRef = useRef(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("signedOut") === "1") {
+      clearAuth();
+      params.delete("signedOut");
+      const qs = params.toString();
+      window.history.replaceState(
+        {},
+        "",
+        `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`,
+      );
+      return;
+    }
+
+    redirectToApexAuthIfNeeded("/login");
+
+    const auth = getAuth();
+    const token = getAuthToken();
+    if (auth?.user?.email?.trim() && token) {
+      if (userNeedsEmailVerification(auth.user)) {
+        router.replace(verifyEmailPath());
+        return;
+      }
+      navigateAfterAuth(auth.user, router);
+    }
+  }, [router]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -142,7 +190,7 @@ export default function SignUpPage() {
 
   function finishAuth(res: { token: string; user: { _id: string; email: string } }) {
     const user = persistAuthResponse(res);
-    router.replace(authRedirectPath(user));
+    navigateAfterAuth(user, router);
   }
 
   function authErrorMessage(err: unknown, fallback: string) {
@@ -152,7 +200,7 @@ export default function SignUpPage() {
   }
 
   async function submit() {
-    if (submitting || providerLoading) return;
+    if (submitting || googleLoading) return;
     setError(null);
 
     const trimmedEmail = email.trim();
@@ -171,11 +219,24 @@ export default function SignUpPage() {
 
     setSubmitting(true);
     try {
-      const res =
-        screen === "signup"
-          ? await registerWithEmail(trimmedEmail, password, agreed)
-          : await loginWithEmail(trimmedEmail, password);
-      finishAuth(res);
+      if (screen === "signup") {
+        const res = await registerWithEmail(trimmedEmail, password, agreed);
+        const user = persistAuthResponse(res);
+        if (userNeedsEmailVerification(user) || res.requiresEmailVerification) {
+          router.push(verifyEmailPath());
+          return;
+        }
+        navigateAfterAuth(user, router);
+        return;
+      }
+
+      const res = await loginWithEmail(trimmedEmail, password);
+      const user = persistAuthResponse(res);
+      if (userNeedsEmailVerification(user) || res.requiresEmailVerification) {
+        router.push(verifyEmailPath());
+        return;
+      }
+      navigateAfterAuth(user, router);
     } catch (err) {
       setError(authErrorMessage(err, "Something went wrong. Please try again."));
     } finally {
@@ -184,7 +245,7 @@ export default function SignUpPage() {
   }
 
   async function submitForgot() {
-    if (submitting || providerLoading) return;
+    if (submitting || googleLoading) return;
     setError(null);
     setForgotSuccess(null);
 
@@ -206,7 +267,7 @@ export default function SignUpPage() {
   }
 
   async function submitGoogle() {
-    if (submitting || providerLoading) return;
+    if (submitting || googleLoading) return;
 
     const clientId = getGoogleClientId();
     if (!clientId) {
@@ -217,7 +278,7 @@ export default function SignUpPage() {
     }
 
     setError(null);
-    setProviderLoading("google");
+    setGoogleLoading(true);
     try {
       const idToken = await requestGoogleIdToken(clientId);
       const res = await loginWithGoogle(idToken);
@@ -225,22 +286,7 @@ export default function SignUpPage() {
     } catch (err) {
       setError(authErrorMessage(err, "Couldn't continue with Google."));
     } finally {
-      setProviderLoading(null);
-    }
-  }
-
-  async function submitProvider(provider: Provider) {
-    if (provider === "google") {
-      await submitGoogle();
-      return;
-    }
-    if (submitting || providerLoading) return;
-    setError(null);
-    setProviderLoading(provider);
-    try {
-      showToast("Sign in with Apple is not available yet.", "info");
-    } finally {
-      setProviderLoading(null);
+      setGoogleLoading(false);
     }
   }
 
@@ -263,100 +309,105 @@ export default function SignUpPage() {
     setForgotSuccess(null);
   }
 
+  function switchScreen(next: "signin" | "signup") {
+    setScreen(next);
+    setError(null);
+    setForgotSuccess(null);
+  }
+
   const isSignUp = screen === "signup";
   const isForgot = screen === "forgot";
-  const formBusy = submitting || providerLoading !== null;
+  const formBusy = submitting || googleLoading;
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-[#fbf7ef] px-4 py-6 sm:px-10 sm:py-12 lg:px-50 lg:py-30">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(251,247,239,0.9),transparent_45%),radial-gradient(circle_at_85%_20%,_rgba(251,247,239,0.6),transparent_40%),radial-gradient(circle_at_10%_80%,_rgba(251,247,239,0.5),transparent_35%)] blur-2xl" />
-      <div className="relative z-[1] mx-auto flex min-h-0 w-full max-w-screen-2xl flex-1 flex-col">
-        <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden rounded-2xl border border-slate-200/70 bg-white shadow-2xl shadow-slate-900/15 lg:grid-cols-2">
-        <section
-          className="relative hidden h-full min-h-0 overflow-hidden border-r border-slate-200 bg-slate-950 lg:block"
-          onMouseEnter={() => {
-            carouselPausedRef.current = true;
-          }}
-          onMouseLeave={() => {
-            carouselPausedRef.current = false;
-          }}
-          aria-roledescription="carousel"
-          aria-label="What Gido Studio gives you"
-        >
-          {/* Cross-fading photo stack — only the active slide is fully opaque. */}
-          {slides.map((slide, i) => (
-            <div
-              key={slide.image}
-              aria-hidden={i !== slideIndex}
-              className={cn(
-                "absolute inset-0 transition-opacity duration-[1100ms] ease-out",
-                i === slideIndex ? "opacity-100" : "opacity-0",
-              )}
-            >
-              <Image
-                src={slide.image}
-                alt=""
-                fill
-                priority={i === 0}
-                sizes="(min-width: 1024px) 50vw, 100vw"
+    <div className="fixed inset-0 z-50 flex h-dvh max-h-dvh flex-col overflow-hidden bg-brand-soft/40 supports-[height:100dvh]:h-[100dvh]">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_15%_10%,_rgba(85,0,31,0.06),transparent_42%),radial-gradient(circle_at_90%_85%,_rgba(213,174,101,0.12),transparent_38%)]" />
+
+      <div className="relative z-[1] mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] sm:px-6 sm:pb-6 sm:pt-6 lg:px-12 lg:py-10">
+        <div className="grid min-h-0 min-w-0 flex-1 grid-cols-1 overflow-hidden rounded-2xl border border-zinc-200/80 bg-white shadow-[0_24px_80px_-24px_rgba(15,23,42,0.18)] lg:grid-cols-[1.05fr_1fr] lg:rounded-3xl">
+          {/* Visual panel — desktop only */}
+          <section
+            className="relative hidden min-h-0 overflow-hidden bg-zinc-950 lg:block"
+            onMouseEnter={() => {
+              carouselPausedRef.current = true;
+            }}
+            onMouseLeave={() => {
+              carouselPausedRef.current = false;
+            }}
+            aria-roledescription="carousel"
+            aria-label={`What ${APP_NAME} gives you`}
+          >
+            {slides.map((slide, i) => (
+              <div
+                key={slide.image}
+                aria-hidden={i !== slideIndex}
                 className={cn(
-                  "object-cover transition-transform duration-[6000ms] ease-out",
-                  i === slideIndex ? "scale-105" : "scale-100",
+                  "absolute inset-0 transition-opacity duration-[1100ms] ease-out",
+                  i === slideIndex ? "opacity-100" : "opacity-0",
                 )}
-              />
-            </div>
-          ))}
-
-          {/* Dark wash so the overlay text always reads, regardless of slide. */}
-          <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/55 to-slate-950/20" />
-          <div className="absolute inset-0 bg-gradient-to-br from-slate-950/40 via-transparent to-transparent" />
-
-          {/* Brand eyebrow — top-left, persistent. */}
-          <div className="absolute inset-x-6 top-6 z-10 sm:inset-x-8 sm:top-8">
-            <p className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.22em] text-amber-300">
-              <span className="h-px w-6 bg-amber-300/60" />
-              Welcome to Gido Studio
-            </p>
-          </div>
-
-          {/* Slide content + pagination — bottom-left. */}
-          <div className="absolute inset-x-6 bottom-6 z-10 text-white sm:inset-x-8 sm:bottom-8">
-            <div className="relative">
-              {slides.map((slide, i) => (
-                <div
-                  key={slide.title}
-                  aria-hidden={i !== slideIndex}
+              >
+                <Image
+                  src={slide.image}
+                  alt=""
+                  fill
+                  priority={i === 0}
+                  unoptimized
+                  sizes="(min-width: 1024px) 55vw, 100vw"
                   className={cn(
-                    "transition-opacity duration-700 ease-out",
-                    i === slideIndex
-                      ? "relative opacity-100"
-                      : "pointer-events-none absolute inset-0 opacity-0",
+                    slide.imageClassName ?? "object-cover",
+                    "transition-transform duration-[6000ms] ease-out",
+                    !slide.imageClassName && (i === slideIndex ? "scale-105" : "scale-100"),
                   )}
-                >
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-300">
-                    {slide.eyebrow}
-                  </p>
-                  <h2 className="mt-3 font-display text-4xl font-semibold leading-[1.05]">
-                    {slide.title}
-                  </h2>
-                  <p className="mt-3 max-w-sm text-sm leading-relaxed text-slate-200">
-                    {slide.body}
-                  </p>
-                </div>
-              ))}
+                />
+              </div>
+            ))}
+
+            <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-zinc-950/60 to-zinc-950/25" />
+            <div className="absolute inset-0 bg-gradient-to-br from-brand/30 via-transparent to-transparent" />
+
+            <div className="absolute inset-x-5 top-6 z-10 lg:inset-x-8 lg:top-8">
+              <Link
+                href="/"
+                className="inline-flex items-center gap-2 text-sm font-medium text-white/70 transition hover:text-white"
+              >
+                <ArrowLeft className="h-4 w-4" aria-hidden />
+                Back to home
+              </Link>
             </div>
 
-            {/* Pagination — animated pill for active, dots for the rest. */}
-            <div className="mt-7 flex items-center justify-between gap-4">
-              <div className="flex items-center gap-2">
+            <div className="absolute inset-x-5 bottom-6 z-10 text-white lg:inset-x-8 lg:bottom-8">
+              <div className="relative">
+                {slides.map((slide, i) => (
+                  <div
+                    key={slide.title}
+                    aria-hidden={i !== slideIndex}
+                    className={cn(
+                      "transition-opacity duration-700 ease-out",
+                      i === slideIndex
+                        ? "relative opacity-100"
+                        : "pointer-events-none absolute inset-0 opacity-0",
+                    )}
+                  >
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#D5AE65]">
+                      {slide.eyebrow}
+                    </p>
+                    <h2 className="mt-3 font-display text-2xl font-semibold leading-[1.08] lg:text-[2rem] xl:text-4xl">
+                      {slide.title}
+                    </h2>
+                    <p className="mt-3 max-w-md text-sm leading-relaxed text-zinc-200">
+                      {slide.body}
+                    </p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-8 flex items-center gap-2">
                 {slides.map((slide, i) => (
                   <button
                     key={slide.title}
                     type="button"
                     onClick={() => {
                       setSlideIndex(i);
-                      // Hold the carousel for a bit after manual interaction so
-                      // it doesn't immediately advance away from the user's pick.
                       carouselPausedRef.current = true;
                       window.setTimeout(() => {
                         carouselPausedRef.current = false;
@@ -365,258 +416,259 @@ export default function SignUpPage() {
                     aria-label={`Show slide ${i + 1}: ${slide.title}`}
                     aria-current={i === slideIndex ? "true" : undefined}
                     className={cn(
-                      "h-1.5 rounded-full transition-all duration-300",
+                      "h-1 rounded-full transition-all duration-300",
                       i === slideIndex
-                        ? "w-9 bg-amber-300"
-                        : "w-1.5 bg-white/40 hover:bg-white/70",
+                        ? "w-8 bg-[#D5AE65]"
+                        : "w-1.5 bg-white/35 hover:bg-white/60",
                     )}
                   />
                 ))}
               </div>
-              <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-300">
-                {String(slideIndex + 1).padStart(2, "0")}
-                <span className="mx-1 text-slate-500">/</span>
-                {String(slides.length).padStart(2, "0")}
-              </span>
             </div>
-          </div>
-        </section>
+          </section>
 
-        <section className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-contain bg-white lg:min-h-0">
-          <div className="mx-auto flex min-h-full w-full max-w-lg flex-col justify-center px-5 py-8 sm:px-6 sm:py-10 lg:px-8 lg:py-8 xl:px-10 xl:py-10">
-            <div className="flex items-center justify-between">
-              <Link
-                href="/"
-                className="text-sm font-medium text-slate-500 transition hover:text-slate-800 lg:hidden"
-              >
-                ← Home
-              </Link>
-              <p className="flex items-center text-xs font-medium uppercase tracking-[0.12em] text-slate-500">
+          {/* Form panel */}
+          <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch] [scrollbar-width:thin]">
+            <div className="mx-auto flex w-full min-w-0 max-w-md flex-col justify-start px-4 py-5 sm:justify-center sm:px-8 sm:py-8 lg:min-h-full lg:justify-center lg:px-10 lg:py-12 max-lg:landscape:justify-start max-lg:landscape:py-4">
+              <div className="flex min-w-0 items-center justify-between gap-2 lg:justify-center">
+                <Link
+                  href="/"
+                  className="inline-flex shrink-0 items-center gap-1.5 text-sm font-medium text-zinc-500 transition hover:text-zinc-800 lg:hidden"
+                >
+                  <ArrowLeft className="h-4 w-4" aria-hidden />
+                  Home
+                </Link>
                 <Image
-                  src="/images/gido_logo.png"
-                  alt="Gido logo"
-                  width={154}
-                  height={154}
+                  src="/svgs/color_logo.svg"
+                  alt={`${APP_NAME} logo`}
+                  width={3965}
+                  height={1231}
+                  priority
+                  className="h-7 w-auto max-w-[min(100%,10.5rem)] shrink sm:h-9 lg:h-10"
                 />
-              </p>
-            </div>
+                <span className="w-12 shrink-0 lg:hidden" aria-hidden />
+              </div>
 
-            <h2 className="mt-6 font-display text-3xl font-semibold tracking-tight text-slate-900">
-              {isForgot
-                ? "Reset your password"
-                : isSignUp
-                  ? "Create your account"
-                  : "Welcome back"}
-            </h2>
-
-            {isForgot ? (
-              <p className="mt-2 text-sm text-slate-600">
-                Enter your studio email. If an account exists, we will send reset instructions.
-              </p>
-            ) : null}
-
-            {!isForgot ? (
-            <div className="mt-7 space-y-3">
-              <button
-                type="button"
-                onClick={() => submitProvider("google")}
-                disabled={formBusy}
-                aria-busy={providerLoading === "google"}
-                className="flex w-full items-center justify-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-800 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                <GoogleMark className="h-4 w-4" />
-                {providerLoading === "google"
-                  ? "Connecting…"
-                  : isSignUp
-                    ? "Sign up with Google"
-                    : "Continue with Google"}
-              </button>
-              <button
-                type="button"
-                onClick={() => submitProvider("apple")}
-                disabled={formBusy}
-                aria-busy={providerLoading === "apple"}
-                className="flex w-full items-center justify-center gap-3 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                <AppleMark className="h-4 w-4" />
-                {providerLoading === "apple"
-                  ? "Connecting…"
-                  : isSignUp
-                    ? "Sign up with Apple"
-                    : "Continue with Apple"}
-              </button>
-            </div>
-            ) : null}
-
-            {!isForgot ? (
-            <div className="my-6 flex items-center gap-3 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
-              <span className="h-px flex-1 bg-slate-200" />
-              or with email
-              <span className="h-px flex-1 bg-slate-200" />
-            </div>
-            ) : null}
-
-            <div className="space-y-4">
-              <label className="block text-sm font-medium text-slate-700">
-                Email
-                <AuthFormInput
-                  type="email"
-                  autoComplete="email"
-                  className="mt-1.5"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  onKeyDown={onKeyDown}
-                  disabled={formBusy}
-                  placeholder="you@studio.com"
-                />
-              </label>
-
-              {!isForgot ? (
-              <label className="block text-sm font-medium text-slate-700">
-                Password
-                <AuthFormPasswordInput
-                  autoComplete={isSignUp ? "new-password" : "current-password"}
-                  className="mt-1.5"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  onKeyDown={onKeyDown}
-                  disabled={formBusy}
-                  placeholder="At least 6 characters"
-                />
-              </label>
-              ) : null}
-
-              {screen === "signin" && !isForgot ? (
-                <div className="flex justify-end">
-                  <button
-                    type="button"
-                    onClick={openForgot}
-                    disabled={formBusy}
-                    className="text-xs font-semibold text-teal-700 underline-offset-2 hover:underline disabled:pointer-events-none disabled:opacity-50"
+              {isForgot ? (
+                <>
+                  <h1 className="mt-6 font-display text-xl font-semibold tracking-tight text-zinc-900 sm:mt-8 sm:text-2xl lg:text-3xl">
+                    Reset your password
+                  </h1>
+                  <p className="mt-2 text-sm leading-relaxed text-zinc-600">
+                    Enter your studio email. If an account exists, we will send reset instructions.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div
+                    role="tablist"
+                    aria-label="Account type"
+                    className="mt-6 flex rounded-full bg-zinc-100 p-1 sm:mt-8"
                   >
-                    Forgot password?
-                  </button>
-                </div>
-              ) : null}
+                    <AuthTab
+                      active={screen === "signin"}
+                      onClick={() => switchScreen("signin")}
+                      disabled={formBusy}
+                    >
+                      Log in
+                    </AuthTab>
+                    <AuthTab
+                      active={screen === "signup"}
+                      onClick={() => switchScreen("signup")}
+                      disabled={formBusy}
+                    >
+                      Create account
+                    </AuthTab>
+                  </div>
 
-              {isSignUp ? (
-                <label className="flex cursor-pointer items-start gap-2 text-xs text-slate-600">
-                  <input
-                    type="checkbox"
-                    checked={agreed}
-                    onChange={(e) => setAgreed(e.target.checked)}
-                    className="mt-0.5 h-4 w-4 rounded border-slate-300 text-teal-700 focus:ring-teal-700"
+                  <h1 className="mt-5 font-display text-xl font-semibold tracking-tight text-zinc-900 sm:mt-6 sm:text-2xl lg:text-3xl">
+                    {isSignUp ? "Start your studio workspace" : "Welcome back"}
+                  </h1>
+                  <p className="mt-2 text-sm leading-relaxed text-zinc-600">
+                    {isSignUp
+                      ? `Set up ${APP_NAME} ${PRODUCT_TAGLINE.toLowerCase()}.`
+                      : "Sign in to manage galleries, bookings, and client delivery."}
+                  </p>
+                </>
+              )}
+
+              <div className="mt-6 space-y-4 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:mt-7">
+                <>
+                <label className="block text-sm font-medium text-zinc-800">
+                  Email
+                  <AuthFormInput
+                    type="email"
+                    autoComplete="email"
+                    inputMode="email"
+                    className="mt-1.5"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    onKeyDown={onKeyDown}
+                    disabled={formBusy}
+                    placeholder="you@studiomail.com"
                   />
-                  <span>
-                    I agree to the{" "}
-                    <a href="#" className="font-medium text-teal-700 underline-offset-2 hover:underline">
-                      Terms
-                    </a>{" "}
-                    and{" "}
-                    <a href="#" className="font-medium text-teal-700 underline-offset-2 hover:underline">
-                      Privacy Policy
-                    </a>
-                    .
-                  </span>
                 </label>
-              ) : null}
 
-              {forgotSuccess ? (
-                <div
-                  role="status"
-                  className="rounded-2xl border border-teal-200 bg-teal-50 px-4 py-3 text-sm text-teal-900"
+                {!isForgot ? (
+                  <label className="block text-sm font-medium text-zinc-800">
+                    Password
+                    <AuthFormPasswordInput
+                      autoComplete={isSignUp ? "new-password" : "current-password"}
+                      className="mt-1.5"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      onKeyDown={onKeyDown}
+                      disabled={formBusy}
+                      placeholder="At least 6 characters"
+                    />
+                  </label>
+                ) : null}
+
+                {screen === "signin" && !isForgot ? (
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={openForgot}
+                      disabled={formBusy}
+                      className="text-xs font-semibold text-brand underline-offset-2 hover:underline disabled:pointer-events-none disabled:opacity-50"
+                    >
+                      Forgot password?
+                    </button>
+                  </div>
+                ) : null}
+
+                {isSignUp ? (
+                  <label className="flex cursor-pointer items-start gap-2.5 text-xs leading-relaxed text-zinc-600 sm:text-[13px]">
+                    <input
+                      type="checkbox"
+                      checked={agreed}
+                      onChange={(e) => setAgreed(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 shrink-0 rounded border-zinc-300 text-brand focus:ring-brand"
+                    />
+                    <span className="min-w-0">
+                      I agree to the{" "}
+                      <a
+                        href="/terms"
+                        className="font-medium text-brand underline-offset-2 hover:underline"
+                      >
+                        Terms
+                      </a>{" "}
+                      and{" "}
+                      <a
+                        href="/privacy"
+                        className="font-medium text-brand underline-offset-2 hover:underline"
+                      >
+                        Privacy Policy
+                      </a>
+                      .
+                    </span>
+                  </label>
+                ) : null}
+                </>
+
+                {forgotSuccess ? (
+                  <div
+                    role="status"
+                    className="rounded-xl border border-brand-muted bg-brand-soft px-4 py-3 text-sm text-brand-ink"
+                  >
+                    <p>{forgotSuccess}</p>
+                    {process.env.NODE_ENV === "development" ? (
+                      <p className="mt-2 text-xs text-brand-ink/80">
+                        Development: open your API terminal and look for{" "}
+                        <code className="rounded bg-white/70 px-1 py-0.5 font-mono text-[11px]">
+                          [password-reset]
+                        </code>{" "}
+                        to copy the reset link.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {error ? (
+                  <div
+                    role="alert"
+                    className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+                  >
+                    {error}
+                  </div>
+                ) : null}
+
+                <button
+                  type="button"
+                  onClick={isForgot ? submitForgot : submit}
+                  disabled={formBusy}
+                  aria-busy={submitting}
+                  className="flex w-full items-center justify-center rounded-xl bg-brand px-4 py-3.5 text-sm font-semibold text-white shadow-sm shadow-brand/20 transition hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-70 sm:py-3"
                 >
-                  <p>{forgotSuccess}</p>
-                  {process.env.NODE_ENV === "development" ? (
-                    <p className="mt-2 text-xs text-teal-800/90">
-                      Development: open your API terminal and look for{" "}
-                      <code className="rounded bg-teal-100/80 px-1 py-0.5 font-mono text-[11px]">
-                        [password-reset]
-                      </code>{" "}
-                      to copy the reset link.
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
+                  {submitting
+                    ? isForgot
+                      ? "Sending…"
+                      : isSignUp
+                        ? "Creating account…"
+                        : "Signing in…"
+                    : isForgot
+                      ? "Send reset instructions"
+                      : isSignUp
+                        ? "Create account"
+                        : "Log in"}
+                </button>
 
-              {error ? (
-                <div
-                  role="alert"
-                  className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
-                >
-                  {error}
-                </div>
-              ) : null}
-
-              <button
-                type="button"
-                onClick={isForgot ? submitForgot : submit}
-                disabled={formBusy}
-                aria-busy={submitting}
-                className="mt-2 flex w-full items-center justify-center rounded-2xl bg-slate-900 py-3 text-sm font-semibold text-white shadow-lg shadow-slate-900/20 transition hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-70"
-              >
-                {submitting
-                  ? isForgot
-                    ? "Sending…"
-                    : isSignUp
-                      ? "Creating account…"
-                      : "Signing in…"
-                  : isForgot
-                    ? "Send reset instructions"
-                    : isSignUp
-                      ? "Create account"
-                      : "Log in"}
-              </button>
-
-              <p className="text-center text-xs text-slate-500">
-                {isForgot ? (
+                {!isForgot ? (
                   <>
+                    <div className="flex items-center gap-3 py-1">
+                      <span className="h-px flex-1 bg-zinc-200" />
+                      <span className="text-xs font-medium text-zinc-400">or</span>
+                      <span className="h-px flex-1 bg-zinc-200" />
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={submitGoogle}
+                      disabled={formBusy}
+                      aria-busy={googleLoading}
+                      className="flex w-full items-center justify-center gap-2.5 rounded-xl border border-zinc-200 bg-white px-4 py-3.5 text-sm font-semibold text-zinc-800 transition hover:border-zinc-300 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-60 sm:py-3"
+                    >
+                      <GoogleMark className="h-4 w-4" />
+                      {googleLoading
+                        ? "Connecting…"
+                        : isSignUp
+                          ? "Sign up with Google"
+                          : "Continue with Google"}
+                    </button>
+                  </>
+                ) : null}
+
+                {isForgot ? (
+                  <p className="text-center text-xs text-zinc-500">
                     Remember your password?{" "}
                     <button
                       type="button"
                       onClick={backToSignIn}
-                      className="font-semibold text-teal-700 underline-offset-2 hover:underline"
+                      className="font-semibold text-brand underline-offset-2 hover:underline"
                     >
                       Back to log in
                     </button>
-                  </>
-                ) : isSignUp ? (
-                  <>
-                    Already have an account?{" "}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setScreen("signin");
-                        setError(null);
-                        setForgotSuccess(null);
-                      }}
-                      className="font-semibold text-teal-700 underline-offset-2 hover:underline"
-                    >
-                      Log in
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    Need an account?{" "}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setScreen("signup");
-                        setError(null);
-                        setForgotSuccess(null);
-                      }}
-                      className="font-semibold text-teal-700 underline-offset-2 hover:underline"
-                    >
-                      Create account
-                    </button>
-                  </>
-                )}
-              </p>
+                  </p>
+                ) : null}
+              </div>
             </div>
-          </div>
-        </section>
+          </section>
         </div>
       </div>
     </div>
+  );
+}
+
+export default function SignUpPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="fixed inset-0 z-50 flex h-dvh max-h-dvh items-center justify-center bg-brand-soft px-4 text-sm text-zinc-600 supports-[height:100dvh]:h-[100dvh]">
+          Loading…
+        </div>
+      }
+    >
+      <LoginPageForm />
+    </Suspense>
   );
 }

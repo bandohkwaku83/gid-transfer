@@ -15,23 +15,41 @@ import { Dropdown, type MenuProps } from "antd";
 import Link from "next/link";
 import { FolderCard } from "@/components/photographer/folder-card";
 import { FolderCoverVisual } from "@/components/photographer/folder-cover-visual";
+import { ReorderableGalleryGrid } from "@/components/photographer/reorderable-gallery-grid";
 import { useFolderListSearch } from "@/components/photographer/photographer-shell";
 import { CreateFolderModal } from "@/components/photographer/create-folder-modal";
 import { useToast } from "@/components/toast-provider";
 import {
   apiFolderStatusToUi,
   deleteFolder,
+  enrichFolderClientNames,
   getFolderClientName,
+  isGalleryPublished,
   listFoldersWithCounts,
   FoldersApiError,
   formatRestoreBeforeLabel,
   type ApiFolder,
 } from "@/lib/folders-api";
 import { listClients } from "@/lib/clients-api";
+import {
+  DashboardPageHeader,
+  dashboardPageHeaderCtaClassName,
+  dashboardPageHeaderDescriptionClassName,
+  dashboardPageHeaderTitleClassName,
+} from "@/components/dashboard/dashboard-page-header";
 import { getSettings, getSettingsDefaultCoverUrl } from "@/lib/settings-api";
 import {
   type GalleryStatusFilter,
 } from "@/lib/gallery-list-stats";
+import {
+  applyGalleryListOrder,
+  loadGalleryListOrder,
+  loadGalleryListSort,
+  mergeGalleryListOrder,
+  saveGalleryListOrder,
+  saveGalleryListSort,
+  type GalleryListSort,
+} from "@/lib/gallery-list-order";
 import { FilterChipSelect } from "@/components/ui/filter-chip-select";
 import { GalleryCardSkeleton, ListRefreshSkeleton } from "@/components/ui/skeletons";
 import { cn } from "@/lib/utils";
@@ -43,9 +61,11 @@ const STATUS_FILTERS: { key: GalleryStatusFilter; label: string }[] = [
   { key: "COMPLETED", label: "Done" },
 ];
 
-type EventDateSort = "newest" | "oldest";
 type ExpiryFilter = "all" | "active" | "expired" | "noExpiry";
 type StarredFilter = "all" | "highTraffic" | "neverOpened";
+
+const GRID_CLASS_NAME =
+  "grid grid-cols-2 gap-2.5 sm:grid-cols-3 sm:gap-3 md:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6";
 
 function statusFilterToApi(status: GalleryStatusFilter): string {
   switch (status) {
@@ -68,7 +88,9 @@ export default function GalleriesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<GalleryStatusFilter>("all");
-  const [eventDateSort, setEventDateSort] = useState<EventDateSort>("newest");
+  const [listSort, setListSort] = useState<GalleryListSort>("newest");
+  const [galleryOrder, setGalleryOrder] = useState<string[]>([]);
+  const [orderReady, setOrderReady] = useState(false);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [expiryFilter, setExpiryFilter] = useState<ExpiryFilter>("all");
   const [starredFilter, setStarredFilter] = useState<StarredFilter>("all");
@@ -81,6 +103,22 @@ export default function GalleriesPage() {
   const [editing, setEditing] = useState<ApiFolder | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [studioDefaultCoverUrl, setStudioDefaultCoverUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    setGalleryOrder(loadGalleryListOrder());
+    setListSort(loadGalleryListSort());
+    setOrderReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!orderReady) return;
+    setGalleryOrder((prev) =>
+      mergeGalleryListOrder(
+        prev,
+        folders.map((folder) => folder._id),
+      ),
+    );
+  }, [folders, orderReady]);
 
   const fetchFolders = useCallback(
     async (search: string, filter: GalleryStatusFilter, signal?: AbortSignal) => {
@@ -124,6 +162,7 @@ export default function GalleriesPage() {
         const map = new Map<string, string>();
         for (const c of clients) map.set(c._id, c.name);
         setClientNameById(map);
+        setFolders((prev) => enrichFolderClientNames(prev, map));
       })
       .catch(() => {});
     return () => {
@@ -144,9 +183,18 @@ export default function GalleriesPage() {
   const handleSaved = useCallback((saved: ApiFolder) => {
     setFolders((prev) => {
       const exists = prev.some((f) => f._id === saved._id);
-      return exists
+      const next = exists
         ? prev.map((f) => (f._id === saved._id ? saved : f))
         : [saved, ...prev];
+      setGalleryOrder((order) => {
+        const merged = mergeGalleryListOrder(
+          [saved._id, ...order.filter((id) => id !== saved._id)],
+          next.map((folder) => folder._id),
+        );
+        saveGalleryListOrder(merged);
+        return merged;
+      });
+      return next;
     });
   }, []);
 
@@ -157,6 +205,11 @@ export default function GalleriesPage() {
       try {
         const result = await deleteFolder(folder._id);
         setFolders((prev) => prev.filter((f) => f._id !== folder._id));
+        setGalleryOrder((order) => {
+          const next = order.filter((id) => id !== folder._id);
+          saveGalleryListOrder(next);
+          return next;
+        });
         const deadline = formatRestoreBeforeLabel(result.restoreBefore);
         showToast(
           deadline
@@ -180,6 +233,13 @@ export default function GalleriesPage() {
     [pendingDeleteId, showToast],
   );
 
+  const handleReorder = useCallback((orderedIds: string[]) => {
+    setGalleryOrder(orderedIds);
+    setListSort("custom");
+    saveGalleryListOrder(orderedIds);
+    saveGalleryListSort("custom");
+  }, []);
+
   const trimmed = debouncedSearch;
   const displayedFolders = useMemo(() => {
     const matchesExpiry = (folder: ApiFolder) => {
@@ -202,17 +262,31 @@ export default function GalleriesPage() {
       return true;
     };
 
-    return [...folders]
-      .filter((folder) => matchesExpiry(folder) && matchesStarred(folder))
-      .sort((a, b) => {
-        const eventA = new Date(a.eventDate).getTime();
-        const eventB = new Date(b.eventDate).getTime();
-        const safeEventA = Number.isNaN(eventA) ? 0 : eventA;
-        const safeEventB = Number.isNaN(eventB) ? 0 : eventB;
+    const filtered = folders.filter(
+      (folder) => matchesExpiry(folder) && matchesStarred(folder),
+    );
 
-        return eventDateSort === "oldest" ? safeEventA - safeEventB : safeEventB - safeEventA;
-      });
-  }, [folders, expiryFilter, starredFilter, eventDateSort]);
+    if (listSort === "custom" && galleryOrder.length > 0) {
+      return applyGalleryListOrder(filtered, galleryOrder);
+    }
+
+    return filtered.sort((a, b) => {
+      const eventA = new Date(a.eventDate).getTime();
+      const eventB = new Date(b.eventDate).getTime();
+      const safeEventA = Number.isNaN(eventA) ? 0 : eventA;
+      const safeEventB = Number.isNaN(eventB) ? 0 : eventB;
+
+      return listSort === "oldest" ? safeEventA - safeEventB : safeEventB - safeEventA;
+    });
+  }, [folders, expiryFilter, starredFilter, galleryOrder, listSort]);
+
+  const canReorderGrid =
+    viewMode === "grid" &&
+    !trimmed &&
+    statusFilter === "all" &&
+    expiryFilter === "all" &&
+    starredFilter === "all" &&
+    displayedFolders.length > 1;
   const showEmpty = !loading && displayedFolders.length === 0;
   const showSpinner = loading && folders.length === 0;
   const viewMenuItems = useMemo<MenuProps["items"]>(
@@ -238,30 +312,18 @@ export default function GalleriesPage() {
 
   return (
     <div className="dashboard-page space-y-6">
-      <section className="relative overflow-hidden rounded-2xl border border-slate-800/50 bg-gradient-to-br from-slate-950 via-indigo-950/85 to-slate-900 shadow-lg shadow-slate-900/20">
-        <div
-          className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-brand/15 blur-3xl"
-          aria-hidden
-        />
-        <div className="relative flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-[1.65rem]">
-              Galleries
-            </h1>
-            <p className="mt-2 max-w-xl text-sm leading-relaxed text-slate-400">
-              Upload raws, track client selections, and deliver finals from one place per shoot.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={openCreate}
-            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white shadow-md transition hover:bg-brand-hover"
-          >
-            <Plus className="h-4 w-4" aria-hidden />
-            New gallery
-          </button>
+      <DashboardPageHeader innerClassName="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <h1 className={dashboardPageHeaderTitleClassName()}>Galleries</h1>
+          <p className={dashboardPageHeaderDescriptionClassName()}>
+            Upload raws, track client selections, and deliver finals from one place per shoot.
+          </p>
         </div>
-      </section>
+        <button type="button" onClick={openCreate} className={dashboardPageHeaderCtaClassName()}>
+          <Plus className="h-4 w-4" aria-hidden />
+          New gallery
+        </button>
+      </DashboardPageHeader>
 
       <div className="space-y-2">
         <div className="overflow-visible rounded-sm bg-zinc-100 px-2 py-1.5 dark:bg-zinc-900">
@@ -279,13 +341,19 @@ export default function GalleriesPage() {
                   })),
                 ]}
               />
-              <FilterChipSelect<EventDateSort>
-                aria-label="Sort by event date"
-                value={eventDateSort}
-                onChange={setEventDateSort}
+              <FilterChipSelect<GalleryListSort>
+                aria-label="Sort galleries"
+                value={listSort}
+                onChange={(value) => {
+                  setListSort(value);
+                  saveGalleryListSort(value);
+                }}
                 options={[
                   { value: "newest", label: "Event Date" },
                   { value: "oldest", label: "Event Date (oldest)" },
+                  ...(listSort === "custom" || galleryOrder.length > 0
+                    ? [{ value: "custom" as const, label: "Custom order" }]
+                    : []),
                 ]}
               />
               <FilterChipSelect<ExpiryFilter>
@@ -371,12 +439,12 @@ export default function GalleriesPage() {
           ) : null}
           <div
             className={cn(
-              "grid grid-cols-2 gap-2 sm:gap-5 lg:grid-cols-3 2xl:grid-cols-4",
+              GRID_CLASS_NAME,
               viewMode === "list" && "md:hidden",
             )}
           >
-            {Array.from({ length: 6 }).map((_, i) => (
-              <GalleryCardSkeleton key={`grid-skeleton-${i}`} />
+            {Array.from({ length: 8 }).map((_, i) => (
+              <GalleryCardSkeleton key={`grid-skeleton-${i}`} compact />
             ))}
           </div>
         </div>
@@ -427,7 +495,7 @@ export default function GalleriesPage() {
               const clientName = getFolderClientName(g, clientNameById);
               const status = apiFolderStatusToUi(g.status);
               const statusLabel = status === "COMPLETED" ? "Done" : status === "DRAFT" ? "Draft" : "Selecting";
-              const hasSharedLink = Boolean(g.share?.enabled || g.shareUrl);
+              const hasSharedLink = isGalleryPublished(g);
               const createdDate = g.createdAt
                 ? new Date(g.createdAt).toLocaleDateString(undefined, {
                     month: "short",
@@ -531,26 +599,40 @@ export default function GalleriesPage() {
             })}
           </div>
 
-          <div
-            className={cn(
-              "grid grid-cols-2 gap-2 sm:gap-5 lg:grid-cols-3 2xl:grid-cols-4",
-              viewMode === "list" && "md:hidden",
-            )}
-          >
-            {displayedFolders.map((g) => (
-              <FolderCard
-                key={g._id}
-                folder={g}
-                clientNameById={clientNameById}
-                studioDefaultCoverUrl={studioDefaultCoverUrl}
-                busy={pendingDeleteId === g._id}
-                onEdit={(f) => {
-                  setEditing(f);
-                  setCreateOpen(true);
-                }}
-                onDelete={handleDelete}
-              />
-            ))}
+          <div className={cn(viewMode === "list" && "md:hidden")}>
+            <ReorderableGalleryGrid
+              items={displayedFolders}
+              getItemId={(folder) => folder._id}
+              reorderable={canReorderGrid}
+              onReorder={handleReorder}
+              className={GRID_CLASS_NAME}
+              renderGhost={(folder) => (
+                <FolderCard
+                  folder={folder}
+                  clientNameById={clientNameById}
+                  studioDefaultCoverUrl={studioDefaultCoverUrl}
+                  compact
+                />
+              )}
+              renderItem={(folder, state) => (
+                <FolderCard
+                  folder={folder}
+                  clientNameById={clientNameById}
+                  studioDefaultCoverUrl={studioDefaultCoverUrl}
+                  busy={pendingDeleteId === folder._id}
+                  reorderable={canReorderGrid}
+                  isDragging={state.isDragging}
+                  isDropTarget={state.isDropTarget}
+                  blockNavigation={state.blockNavigation}
+                  onReorderPointerDown={state.onReorderPointerDown}
+                  onEdit={(f) => {
+                    setEditing(f);
+                    setCreateOpen(true);
+                  }}
+                  onDelete={handleDelete}
+                />
+              )}
+            />
           </div>
         </>
       )}

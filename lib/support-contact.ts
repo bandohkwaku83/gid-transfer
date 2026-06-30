@@ -1,85 +1,90 @@
-import { APP_NAME } from "@/lib/branding";
-
-export const SUPPORT_EMAIL = "support@gido.studio";
-
-export const SUPPORT_ISSUE_CATEGORIES = [
-  { id: "bug", label: "Something isn't working" },
+export const FALLBACK_REPORT_ISSUE_TOPICS = [
+  { id: "not_working", label: "Something isn't working" },
   { id: "billing", label: "Billing or plan" },
-  { id: "gallery", label: "Galleries or client share" },
-  { id: "upload", label: "Uploads or storage" },
+  { id: "feature_request", label: "Feature request" },
   { id: "account", label: "Account or login" },
-  { id: "other", label: "Other" },
+  { id: "other", label: "Something else" },
 ] as const;
 
-export type SupportIssueCategoryId = (typeof SUPPORT_ISSUE_CATEGORIES)[number]["id"];
+export type ReportIssueTopicId = (typeof FALLBACK_REPORT_ISSUE_TOPICS)[number]["id"];
 
-export function supportCategoryLabel(id: SupportIssueCategoryId): string {
-  return SUPPORT_ISSUE_CATEGORIES.find((c) => c.id === id)?.label ?? "Support request";
-}
-
-export type SupportReportContext = {
-  reporterEmail: string;
-  studioName?: string;
-  planLabel?: string;
-  pageUrl?: string;
-  userAgent?: string;
+export type HelpSupportAttachmentsConfig = {
+  enabled: boolean;
+  maxCount: number;
+  maxSizeBytes: number;
+  acceptedTypes: string[];
+  hint: string;
 };
 
-export function buildSupportMailto(
-  categoryId: SupportIssueCategoryId,
-  message: string,
-  context: SupportReportContext,
-): string {
-  const category = supportCategoryLabel(categoryId);
-  const subject = `${APP_NAME} support: ${category}`;
-  const lines = [
-    message.trim(),
-    "",
-    "---",
-    `Category: ${category}`,
-    `Reporter: ${context.reporterEmail || "unknown"}`,
-    context.studioName ? `Studio: ${context.studioName}` : null,
-    context.planLabel ? `Plan: ${context.planLabel}` : null,
-    context.pageUrl ? `Page: ${context.pageUrl}` : null,
-    context.userAgent ? `Browser: ${context.userAgent}` : null,
-  ].filter(Boolean);
+export type HelpSupportFormConfig = {
+  title: string;
+  subtitle: string;
+  topics: ReadonlyArray<{ id: string; label: string }>;
+  descriptionPlaceholder: string;
+  attachments: HelpSupportAttachmentsConfig;
+};
 
-  const params = new URLSearchParams({
-    subject,
-    body: lines.join("\n"),
-  });
-  return `mailto:${SUPPORT_EMAIL}?${params.toString()}`;
+export type HelpSupportSettings = {
+  helpSupport: HelpSupportFormConfig;
+  reportIssue: HelpSupportFormConfig;
+};
+
+const FALLBACK_ATTACHMENTS: HelpSupportAttachmentsConfig = {
+  enabled: true,
+  maxCount: 5,
+  maxSizeBytes: 5_242_880,
+  acceptedTypes: ["PNG", "JPG", "WebP", "GIF", "PDF"],
+  hint: "Optional — attach up to 5 screenshots or files (5MB each).",
+};
+
+const FALLBACK_FORM: HelpSupportFormConfig = {
+  title: "Report an issue",
+  subtitle: "Tell us what happened. You can attach screenshots or files below.",
+  topics: FALLBACK_REPORT_ISSUE_TOPICS,
+  descriptionPlaceholder:
+    "What were you trying to do? What did you expect? What happened instead?",
+  attachments: FALLBACK_ATTACHMENTS,
+};
+
+export const FALLBACK_HELP_SUPPORT_SETTINGS: HelpSupportSettings = {
+  helpSupport: FALLBACK_FORM,
+  reportIssue: FALLBACK_FORM,
+};
+
+const ATTACHMENT_MIME_BY_LABEL: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+  pdf: "application/pdf",
+};
+
+export function attachmentsAcceptAttribute(types: string[]): string {
+  const values = types
+    .map((type) => ATTACHMENT_MIME_BY_LABEL[type.trim().toLowerCase()] ?? type.trim())
+    .filter(Boolean);
+  return values.length > 0 ? values.join(",") : "image/*,application/pdf";
 }
 
-export function buildGeneralSupportMailto(context: SupportReportContext): string {
-  const subject = `${APP_NAME} support request`;
-  const lines = [
-    "Hi, I need help with:",
-    "",
-    "",
-    "---",
-    `Reporter: ${context.reporterEmail || "unknown"}`,
-    context.studioName ? `Studio: ${context.studioName}` : null,
-    context.planLabel ? `Plan: ${context.planLabel}` : null,
-    context.pageUrl ? `Page: ${context.pageUrl}` : null,
-  ].filter(Boolean);
-
-  const params = new URLSearchParams({
-    subject,
-    body: lines.join("\n"),
-  });
-  return `mailto:${SUPPORT_EMAIL}?${params.toString()}`;
+export function formatAttachmentSize(bytes: number): string {
+  if (bytes >= 1_048_576) {
+    const mb = bytes / 1_048_576;
+    return Number.isInteger(mb) ? `${mb}MB` : `${mb.toFixed(1)}MB`;
+  }
+  const kb = Math.max(1, Math.round(bytes / 1024));
+  return `${kb}KB`;
 }
 
-export function formatSupportContextForClipboard(context: SupportReportContext): string {
-  return [
-    `App: ${APP_NAME}`,
-    `Email: ${context.reporterEmail || "unknown"}`,
-    context.studioName ? `Studio: ${context.studioName}` : null,
-    context.planLabel ? `Plan: ${context.planLabel}` : null,
-    context.pageUrl ? `Page: ${context.pageUrl}` : null,
-    context.userAgent ? `Browser: ${context.userAgent}` : null,
-  ]
-    .filter(Boolean)
-    .join("\n");
+export function fileMatchesAcceptedType(file: File, acceptedTypes: string[]): boolean {
+  if (acceptedTypes.length === 0) return true;
+  const mime = file.type.toLowerCase();
+  const name = file.name.toLowerCase();
+  return acceptedTypes.some((raw) => {
+    const type = raw.trim().toLowerCase();
+    const mimeType = ATTACHMENT_MIME_BY_LABEL[type];
+    if (mimeType && mime === mimeType) return true;
+    if (name.endsWith(`.${type}`)) return true;
+    return false;
+  });
 }

@@ -11,6 +11,7 @@ import {
   Copy,
   Eye,
   ExternalLink,
+  // FileText,
   Focus,
   ImageIcon,
   ImagePlus,
@@ -37,6 +38,7 @@ import { CoverFocalPreview } from "@/components/photographer/cover-focal-preview
 import { GalleryCoverHeroPreview } from "@/components/client/gallery-cover-hero-preview";
 import {
   GALLERY_COVER_FRAMES,
+  normalizeGalleryCoverFrame,
   type GalleryCoverFrame,
 } from "@/lib/gallery-cover-frame";
 import { CoverFrameThumb } from "@/components/photographer/cover-frame-thumb";
@@ -46,16 +48,23 @@ import {
 } from "@/lib/gallery-cover-frame-preview";
 import {
   coverColorsMatch,
+  GALLERY_COVER_ACCENT_PRESETS,
   GALLERY_COVER_COLOR_PRESETS,
   normalizeGalleryCoverColor,
+  resolveGalleryCoverButtonColor,
+  resolveGalleryCoverTextColor,
+  type GalleryCoverColorPreset,
 } from "@/lib/gallery-cover-color";
 import type { FolderStatus } from "@/lib/demo-data";
 import {
   GALLERY_IMAGE_LAYOUTS,
   type GalleryImageLayout,
+  type GalleryImageLayoutOption,
   previewGridClass,
   previewTileClass,
 } from "@/lib/gallery-image-layout";
+import { galleryFontStack, useGalleryGoogleFonts } from "@/lib/gallery-typography";
+import type { GalleryCoverFrameOption } from "@/lib/gallery-cover-frame";
 import { FormInput, FormTextArea } from "@/components/ui/form-input";
 import { galleryAccessPinDigits } from "@/lib/gallery-access-pin";
 import { cn } from "@/lib/utils";
@@ -66,63 +75,38 @@ import {
 } from "@/lib/gallery-share-links";
 import { statusLabel } from "@/components/photographer/folder-detail-bits";
 
-export type FolderEditorTab = "gallery" | "uploads" | "selection" | "finals";
+export type FolderEditorTab = "dashboard" | "gallery" | "uploads" | "selection" | "finals" | "blog";
 export type PreviewLayout = GalleryImageLayout;
 export type PreviewViewport = "desktop" | "mobile";
-
-const TITLE_FONTS = ["Playfair Display", "Cormorant Garamond", "Libre Baskerville", "DM Serif Display"];
-const BODY_FONTS = ["Inter", "DM Sans", "Source Sans 3", "Nunito Sans"];
-
-function fontFamilyStack(name: string, fallback: string): string {
-  return `"${name}", ${fallback}`;
-}
-
-function PreviewOnlyBadge({ className }: { className?: string }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800 dark:bg-amber-950/40 dark:text-amber-200",
-        className,
-      )}
-    >
-      Preview
-    </span>
-  );
-}
 
 function CustomizeSection({
   icon: Icon,
   title,
   description,
-  previewOnly,
   children,
   footer,
 }: {
   icon: ComponentType<{ className?: string; strokeWidth?: number }>;
   title: string;
   description?: string;
-  previewOnly?: boolean;
   children: ReactNode;
   footer?: ReactNode;
 }) {
   return (
     <section className="rounded-2xl border border-zinc-200/90 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
       <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex min-w-0 items-start gap-2.5">
-            <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand dark:bg-brand/15 dark:text-brand-on-dark">
-              <Icon className="h-4 w-4" strokeWidth={1.75} aria-hidden />
-            </span>
-            <div className="min-w-0">
-              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">{title}</h3>
-              {description ? (
-                <p className="mt-0.5 text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-                  {description}
-                </p>
-              ) : null}
-            </div>
+        <div className="flex min-w-0 items-start gap-2.5">
+          <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand dark:bg-brand/15 dark:text-brand-on-dark">
+            <Icon className="h-4 w-4" strokeWidth={1.75} aria-hidden />
+          </span>
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">{title}</h3>
+            {description ? (
+              <p className="mt-0.5 text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+                {description}
+              </p>
+            ) : null}
           </div>
-          {previewOnly ? <PreviewOnlyBadge /> : null}
         </div>
       </div>
       <div className="space-y-3 p-4">{children}</div>
@@ -156,12 +140,22 @@ function FontSelect({
         className="mt-1.5 w-full [&_.ant-select-selector]:!rounded-lg [&_.ant-select-selector]:!border-zinc-200 [&_.ant-select-selector]:!bg-white [&_.ant-select-selector]:!py-1 dark:[&_.ant-select-selector]:!border-zinc-700 dark:[&_.ant-select-selector]:!bg-zinc-900"
         popupMatchSelectWidth
         optionRender={(option) => (
-          <span style={{ fontFamily: fontFamilyStack(String(option.value), fallback) }}>
+          <span
+            style={{
+              fontFamily:
+                galleryFontStack(String(option.value), fallback) ?? `"${String(option.value)}", ${fallback}`,
+            }}
+          >
             {option.label}
           </span>
         )}
         labelRender={(option) => (
-          <span style={{ fontFamily: fontFamilyStack(String(option.value), fallback) }}>
+          <span
+            style={{
+              fontFamily:
+                galleryFontStack(String(option.value), fallback) ?? `"${String(option.value)}", ${fallback}`,
+            }}
+          >
             {option.label}
           </span>
         )}
@@ -446,7 +440,7 @@ export function FolderEditorChrome({
   };
 
   const outlineActionClass =
-    "inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3.5 py-2 text-[13px] font-medium text-zinc-900 shadow-sm transition hover:border-zinc-300 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-45 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:border-zinc-600 dark:hover:bg-zinc-800";
+    "inline-flex items-center gap-1.5 rounded-lg border border-[#55001F] bg-white px-3.5 py-2 text-[13px] font-medium text-zinc-900 shadow-sm transition hover:bg-[#55001F]/5 disabled:cursor-not-allowed disabled:opacity-45 dark:border-[#55001F] dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-[#55001F]/10";
 
   const handleShareMenuClick = ({ key }: { key: string }) => {
     if (key === "copy") {
@@ -502,25 +496,28 @@ export function FolderEditorChrome({
             </button>
           </Dropdown>
 
-          {shareActive && shareUrl ? (
-            <a
-              href={shareUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className={outlineActionClass}
-            >
-              <Eye className="h-4 w-4 text-zinc-600 dark:text-zinc-400" strokeWidth={1.75} aria-hidden />
-              Live view
-            </a>
-          ) : (
-            <span
-              className={cn(outlineActionClass, "cursor-not-allowed opacity-45")}
-              title="Share link not available yet"
-            >
-              <Eye className="h-4 w-4 text-zinc-400" strokeWidth={1.75} aria-hidden />
-              Live view
-            </span>
-          )}
+          <button
+            type="button"
+            disabled={!shareActive || !shareUrl}
+            title={shareActive && shareUrl ? undefined : "Share link not available yet"}
+            onClick={() => {
+              if (!shareActive || !shareUrl) return;
+              window.open(shareUrl, "_blank", "noopener,noreferrer");
+            }}
+            className={outlineActionClass}
+          >
+            <Eye
+              className={cn(
+                "h-4 w-4",
+                shareActive && shareUrl
+                  ? "text-zinc-600 dark:text-zinc-400"
+                  : "text-zinc-400",
+              )}
+              strokeWidth={1.75}
+              aria-hidden
+            />
+            Live view
+          </button>
 
           <div className="inline-flex overflow-hidden rounded-lg bg-brand text-white shadow-sm">
             <button
@@ -599,82 +596,106 @@ export function FolderEditorTabBar({
 }: {
   tab: FolderEditorTab;
   onTabChange: (tab: FolderEditorTab) => void;
-  counts: { uploads: number; selection: number; finals: number };
+  counts: { uploads: number; selection: number; finals: number; blog?: number };
   showPreviewToggle: boolean;
   previewViewport: PreviewViewport;
   onPreviewViewportChange: (v: PreviewViewport) => void;
 }) {
-  const items: { key: FolderEditorTab; label: string }[] = [
-    { key: "gallery", label: "Gallery" },
-    { key: "uploads", label: "Upload raw" },
-    { key: "selection", label: "Client selection" },
-    { key: "finals", label: "Final images" },
+  const items: {
+    key: FolderEditorTab;
+    label: string;
+    shortLabel: string;
+    icon: ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
+  }[] = [
+    { key: "dashboard", label: "Gallery dashboard", shortLabel: "Dashboard", icon: LayoutGrid },
+    { key: "gallery", label: "Design", shortLabel: "Design", icon: Palette },
+    { key: "uploads", label: "Upload raw", shortLabel: "Upload raw", icon: Upload },
+    { key: "selection", label: "Client selection", shortLabel: "Selection", icon: CheckCircle2 },
+    { key: "finals", label: "Final images", shortLabel: "Finals", icon: ImageIcon },
+    // { key: "blog", label: "Blog", shortLabel: "Blog", icon: FileText },
   ];
 
+  function tabClass(active: boolean) {
+    return cn(
+      "inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium transition sm:px-3",
+      active
+        ? "bg-brand text-white"
+        : "text-zinc-600 hover:bg-white hover:text-zinc-900",
+    );
+  }
+
+  function previewClass(active: boolean) {
+    return cn(
+      "inline-flex h-8 w-9 items-center justify-center rounded-md transition",
+      active
+        ? "bg-brand text-white"
+        : "text-zinc-500 hover:bg-white hover:text-zinc-800",
+    );
+  }
+
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200/70 dark:border-zinc-800/80">
-      <div
-        role="tablist"
-        aria-label="Gallery workspace"
-        className="-mb-px flex flex-wrap gap-0"
-      >
-        {items.map(({ key, label }) => {
-          const active = tab === key;
-          const count =
-            key === "uploads"
-              ? counts.uploads
-              : key === "selection"
-                ? counts.selection
-                : key === "finals"
-                  ? counts.finals
-                  : null;
-          return (
-            <button
-              key={key}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              onClick={() => onTabChange(key)}
-              className={cn(
-                "relative px-3.5 py-2.5 text-[13px] transition",
-                active
-                  ? "font-medium text-zinc-900 dark:text-zinc-50"
-                  : "text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200",
-              )}
-            >
-              {label}
-              {count != null && count > 0 ? (
-                <span
-                  className={cn(
-                    "ml-1 tabular-nums",
-                    active ? "text-zinc-500 dark:text-zinc-400" : "text-zinc-400",
-                  )}
-                >
-                  {count}
-                </span>
-              ) : null}
-              {active ? (
-                <span
-                  className="absolute inset-x-3.5 bottom-0 h-px bg-zinc-900 dark:bg-zinc-100"
-                  aria-hidden
-                />
-              ) : null}
-            </button>
-          );
-        })}
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-brand/10 bg-[#F1EBF0] px-2 py-1.5 sm:px-2.5">
+      <div className="min-w-0 flex-1 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <div
+          role="tablist"
+          aria-label="Gallery workspace"
+          className="inline-flex gap-0.5 rounded-lg bg-[#f5f5f5] p-0.5"
+        >
+          {items.map(({ key, label, shortLabel, icon: Icon }) => {
+            const active = tab === key;
+            const count =
+              key === "uploads"
+                ? counts.uploads
+                : key === "selection"
+                  ? counts.selection
+                  : key === "finals"
+                    ? counts.finals
+                    : key === "blog"
+                      ? counts.blog
+                      : null;
+
+            return (
+              <button
+                key={key}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                title={label}
+                onClick={() => onTabChange(key)}
+                className={tabClass(active)}
+              >
+                <Icon className="h-3.5 w-3.5 shrink-0 opacity-80" aria-hidden />
+                <span className="hidden sm:inline">{label}</span>
+                <span className="sm:hidden">{shortLabel}</span>
+                {count != null && count > 0 ? (
+                  <span
+                    className={cn(
+                      "inline-flex min-w-[1.15rem] items-center justify-center rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums leading-none",
+                      active
+                        ? "bg-white/20 text-white"
+                        : "bg-zinc-200/80 text-zinc-600",
+                    )}
+                  >
+                    {count}
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
       </div>
+
       {showPreviewToggle ? (
-        <div className="mb-2 inline-flex items-center gap-0.5 rounded-md bg-zinc-100/80 p-0.5 dark:bg-zinc-800/50">
+        <div
+          className="inline-flex shrink-0 items-center gap-0.5 rounded-lg bg-[#f5f5f5] p-0.5"
+          role="group"
+          aria-label="Preview viewport"
+        >
           <button
             type="button"
             aria-pressed={previewViewport === "desktop"}
             onClick={() => onPreviewViewportChange("desktop")}
-            className={cn(
-              "inline-flex h-7 w-8 items-center justify-center rounded transition",
-              previewViewport === "desktop"
-                ? "bg-white text-zinc-800 shadow-sm dark:bg-zinc-700 dark:text-zinc-100"
-                : "text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300",
-            )}
+            className={previewClass(previewViewport === "desktop")}
             aria-label="Desktop preview"
           >
             <Monitor className="h-3.5 w-3.5" strokeWidth={1.75} aria-hidden />
@@ -683,12 +704,7 @@ export function FolderEditorTabBar({
             type="button"
             aria-pressed={previewViewport === "mobile"}
             onClick={() => onPreviewViewportChange("mobile")}
-            className={cn(
-              "inline-flex h-7 w-8 items-center justify-center rounded transition",
-              previewViewport === "mobile"
-                ? "bg-white text-zinc-800 shadow-sm dark:bg-zinc-700 dark:text-zinc-100"
-                : "text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300",
-            )}
+            className={previewClass(previewViewport === "mobile")}
             aria-label="Mobile preview"
           >
             <Smartphone className="h-3.5 w-3.5" strokeWidth={1.75} aria-hidden />
@@ -729,19 +745,25 @@ export function CoverColorPicker({
   onChange,
   className,
   disabled,
+  colorPresets = GALLERY_COVER_COLOR_PRESETS,
+  label = "Backdrop color",
+  hint,
 }: {
   value: string;
   onChange: (hex: string) => void;
   className?: string;
   disabled?: boolean;
+  colorPresets?: readonly GalleryCoverColorPreset[];
+  label?: string;
+  hint?: string;
 }) {
   const normalized = normalizeGalleryCoverColor(value);
 
   return (
     <div className={cn("space-y-2", className)}>
-      <p className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">Backdrop color</p>
+      <p className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400">{label}</p>
       <div className="flex flex-wrap gap-1.5">
-        {GALLERY_COVER_COLOR_PRESETS.map(({ id, hex, label }) => {
+        {colorPresets.map(({ id, hex, label }) => {
           const selected = coverColorsMatch(normalized, hex);
           return (
             <button
@@ -780,9 +802,13 @@ export function CoverColorPicker({
           />
         </label>
       </div>
-      <p className="text-[10px] text-zinc-400 dark:text-zinc-500">
-        Used on cinematic, collage, bento, carousel, and other framed cover styles.
-      </p>
+      {hint ? (
+        <p className="text-[10px] text-zinc-400 dark:text-zinc-500">{hint}</p>
+      ) : label === "Backdrop color" ? (
+        <p className="text-[10px] text-zinc-400 dark:text-zinc-500">
+          Used on cinematic, collage, bento, carousel, and other framed cover styles.
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -793,12 +819,14 @@ export function CoverFrameStylePicker({
   coverColor,
   className,
   disabled,
+  coverFrames = GALLERY_COVER_FRAMES,
 }: {
   value: GalleryCoverFrame;
   onChange: (frame: GalleryCoverFrame) => void;
   coverColor?: string;
   className?: string;
   disabled?: boolean;
+  coverFrames?: readonly GalleryCoverFrameOption[];
 }) {
   return (
     <div
@@ -809,8 +837,9 @@ export function CoverFrameStylePicker({
       role="listbox"
       aria-label="Cover image style"
     >
-      {GALLERY_COVER_FRAMES.map(({ id, label, shortLabel, description }) => {
-        const selected = value === id;
+      {coverFrames.map(({ id, label, shortLabel, description }) => {
+        const frameId = normalizeGalleryCoverFrame(id);
+        const selected = value === frameId;
         return (
           <button
             key={id}
@@ -820,7 +849,7 @@ export function CoverFrameStylePicker({
             aria-label={`${label}. ${description}`}
             title={`${label} — ${description}`}
             disabled={disabled}
-            onClick={() => onChange(id)}
+            onClick={() => onChange(frameId)}
             className={cn(
               "flex flex-col items-stretch rounded-xl border p-2 transition disabled:opacity-50",
               selected
@@ -829,10 +858,10 @@ export function CoverFrameStylePicker({
             )}
           >
             <div
-              className={cn("w-full", coverFrameThumbShellClass(id, selected, coverColor))}
-              style={coverFrameThumbShellStyle(id, coverColor)}
+              className={cn("w-full", coverFrameThumbShellClass(frameId, selected, coverColor))}
+              style={coverFrameThumbShellStyle(frameId, coverColor)}
             >
-              <CoverFrameThumb frame={id} />
+              <CoverFrameThumb frame={frameId} />
             </div>
             <span
               className={cn(
@@ -854,11 +883,13 @@ export function GalleryLayoutStylePicker({
   onChange,
   className,
   disabled,
+  gridLayouts = GALLERY_IMAGE_LAYOUTS,
 }: {
   value: GalleryImageLayout;
   onChange: (layout: GalleryImageLayout) => void;
   className?: string;
   disabled?: boolean;
+  gridLayouts?: readonly GalleryImageLayoutOption[];
 }) {
   return (
     <div
@@ -869,7 +900,7 @@ export function GalleryLayoutStylePicker({
       role="listbox"
       aria-label="Image layout style"
     >
-      {GALLERY_IMAGE_LAYOUTS.map(({ id, label, description, icon: Icon }) => {
+      {gridLayouts.map(({ id, label, description, icon: Icon }) => {
         const selected = value === id;
         return (
           <button
@@ -915,10 +946,10 @@ export function GalleryClientPreview({
   coverSrc,
   hasCover,
   title,
-  eventDateLabel,
-  studioName,
   coverFrame,
   coverColor,
+  coverTextColor,
+  coverButtonColor,
   focalX,
   focalY,
   previewLayout,
@@ -930,10 +961,10 @@ export function GalleryClientPreview({
   coverSrc: string;
   hasCover: boolean;
   title: string;
-  eventDateLabel: string;
-  studioName: string;
   coverFrame: GalleryCoverFrame;
   coverColor?: string;
+  coverTextColor?: string;
+  coverButtonColor?: string;
   focalX: number;
   focalY: number;
   previewLayout: PreviewLayout;
@@ -960,10 +991,10 @@ export function GalleryClientPreview({
         coverSrc={coverSrc}
         hasCover={hasCover}
         title={title}
-        eventDateLabel={eventDateLabel}
-        studioName={studioName}
         coverFrame={coverFrame}
         coverColor={coverColor}
+        coverTextColor={coverTextColor}
+        coverButtonColor={coverButtonColor}
         focalX={focalX}
         focalY={focalY}
         titleFont={titleFont}
@@ -985,13 +1016,23 @@ export function CustomizeGallerySidebar({
   onCoverFrameChange,
   coverColorDraft,
   onCoverColorChange,
+  coverTextColorDraft,
+  onCoverTextColorChange,
+  coverButtonColorDraft,
+  onCoverButtonColorChange,
   savingCoverFrame,
   previewLayout,
   onPreviewLayoutChange,
+  savingImageLayout = false,
   titleFont,
   bodyFont,
   onTitleFontChange,
   onBodyFontChange,
+  coverFrameOptions = GALLERY_COVER_FRAMES,
+  gridLayoutOptions = GALLERY_IMAGE_LAYOUTS,
+  coverColorPresets = GALLERY_COVER_COLOR_PRESETS,
+  titleFontOptions,
+  bodyFontOptions,
   allowDownloads,
   onAllowDownloadsChange,
   musicEnabled,
@@ -1024,13 +1065,23 @@ export function CustomizeGallerySidebar({
   onCoverFrameChange: (frame: GalleryCoverFrame) => void;
   coverColorDraft: string;
   onCoverColorChange: (hex: string) => void;
+  coverTextColorDraft: string;
+  onCoverTextColorChange: (hex: string) => void;
+  coverButtonColorDraft: string;
+  onCoverButtonColorChange: (hex: string) => void;
   savingCoverFrame: boolean;
   previewLayout: PreviewLayout;
   onPreviewLayoutChange: (layout: PreviewLayout) => void;
+  savingImageLayout?: boolean;
   titleFont: string;
   bodyFont: string;
   onTitleFontChange: (font: string) => void;
   onBodyFontChange: (font: string) => void;
+  coverFrameOptions?: readonly GalleryCoverFrameOption[];
+  gridLayoutOptions?: readonly GalleryImageLayoutOption[];
+  coverColorPresets?: readonly GalleryCoverColorPreset[];
+  titleFontOptions?: readonly string[];
+  bodyFontOptions?: readonly string[];
   allowDownloads: boolean;
   onAllowDownloadsChange: (v: boolean) => void;
   musicEnabled: boolean;
@@ -1059,6 +1110,8 @@ export function CustomizeGallerySidebar({
   onUploadMusic: () => void;
   onRemoveMusic: () => void;
 }) {
+  useGalleryGoogleFonts(titleFont, bodyFont);
+
   return (
     <aside
       className={cn(
@@ -1173,12 +1226,34 @@ export function CustomizeGallerySidebar({
           value={coverColorDraft}
           onChange={onCoverColorChange}
           disabled={savingCoverFrame}
+          colorPresets={coverColorPresets}
         />
+        <div className="grid gap-3 sm:grid-cols-2">
+          <CoverColorPicker
+            value={coverTextColorDraft}
+            onChange={onCoverTextColorChange}
+            disabled={savingCoverFrame}
+            colorPresets={GALLERY_COVER_ACCENT_PRESETS}
+            label="Title text color"
+            hint="Color of the gallery name on the cover hero."
+            className="mt-1"
+          />
+          <CoverColorPicker
+            value={coverButtonColorDraft}
+            onChange={onCoverButtonColorChange}
+            disabled={savingCoverFrame}
+            colorPresets={GALLERY_COVER_ACCENT_PRESETS}
+            label="Button color"
+            hint="Border and text on the “View gallery” button."
+            className="mt-1"
+          />
+        </div>
         <CoverFrameStylePicker
           value={coverFrameDraft}
           coverColor={coverColorDraft}
           onChange={onCoverFrameChange}
           disabled={savingCoverFrame}
+          coverFrames={coverFrameOptions}
           className="mt-3"
         />
       </CustomizeSection>
@@ -1186,27 +1261,28 @@ export function CustomizeGallerySidebar({
       <CustomizeSection
         icon={LayoutGrid}
         title="Grid & typography"
-        description="Explore layout and fonts in the preview. Clients pick their own grid layout in the gallery today."
-        previewOnly
+        description="Default grid style and fonts on the client link save automatically."
       >
         <div>
           <p className="mb-2 text-[11px] font-medium text-zinc-600 dark:text-zinc-400">Default grid style</p>
           <GalleryLayoutStylePicker
             value={previewLayout}
             onChange={onPreviewLayoutChange}
+            disabled={savingImageLayout}
+            gridLayouts={gridLayoutOptions}
           />
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <FontSelect
             label="Title font"
             value={titleFont}
-            options={TITLE_FONTS}
+            options={titleFontOptions ?? ["Playfair Display"]}
             onChange={onTitleFontChange}
           />
           <FontSelect
             label="Body font"
             value={bodyFont}
-            options={BODY_FONTS}
+            options={bodyFontOptions ?? ["Inter"]}
             onChange={onBodyFontChange}
           />
         </div>
@@ -1263,20 +1339,18 @@ export function CustomizeGallerySidebar({
             </div>
           </div>
 
-          <div className="space-y-3 opacity-90">
+          <div className="space-y-3">
             <div className="flex items-center justify-between gap-3 rounded-lg px-0.5">
               <div className="min-w-0">
                 <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">Allow downloads</p>
-                <p className="text-[10px] text-zinc-500">Preview in sidebar only</p>
+                <p className="text-[10px] text-zinc-500">Clients can download photos from the share link</p>
               </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <PreviewOnlyBadge />
-                <ToggleSwitch
-                  label="Allow downloads"
-                  checked={allowDownloads}
-                  onChange={onAllowDownloadsChange}
-                />
-              </div>
+              <ToggleSwitch
+                label="Allow downloads"
+                checked={allowDownloads}
+                disabled={accessPinBusy}
+                onChange={onAllowDownloadsChange}
+              />
             </div>
             <div className="rounded-xl border border-zinc-100 bg-zinc-50/50 p-3 dark:border-zinc-800 dark:bg-zinc-900/30">
               <div className="flex items-center justify-between gap-3">
@@ -1387,6 +1461,14 @@ export function ClientSelectionLimitCard({
   );
 }
 
+function shareClientAccessLine(clientName: string): string {
+  const client = clientName.trim();
+  if (!client || client === "Unknown client") {
+    return "Send this link so your client can browse photos, leave notes, and submit their picks — no account needed.";
+  }
+  return `${client} can browse photos, heart selections, and submit picks through this portal.`;
+}
+
 export function ShareWithClientCard({
   title,
   clientName,
@@ -1408,61 +1490,135 @@ export function ShareWithClientCard({
   onCopy: () => void;
   onRegenerate: () => void;
 }) {
+  const galleryTitle = title.trim() || "Gallery";
+  const client = clientName.trim();
+  const knownClient = Boolean(client && client !== "Unknown client");
+  const shareMessage = useMemo(
+    () =>
+      shareActive && shareUrl
+        ? buildGalleryShareMessage(galleryTitle, shareUrl, knownClient ? client : undefined)
+        : "",
+    [shareActive, shareUrl, galleryTitle, client, knownClient],
+  );
+
+  const quickActionClass =
+    "inline-flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-[11px] font-semibold text-zinc-700 transition hover:border-brand/20 hover:bg-brand-soft/40 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:border-brand/30 dark:hover:bg-brand/10";
+
   return (
-    <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 text-white shadow-lg">
-      <div className="p-4">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-400">Frame</p>
-        <h3 className="mt-2 text-base font-semibold">Share with Client</h3>
-        <p className="mt-2 text-xs leading-relaxed text-zinc-400">
-          {clientName} have access to this selection portal · {eventDateLabel}.
-        </p>
-        <div className="mt-4 flex overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900">
-          <div className="flex shrink-0 items-center border-r border-zinc-700 px-2">
-            <Link2 className="h-3.5 w-3.5 text-zinc-500" aria-hidden />
+    <div className="overflow-hidden rounded-2xl border border-zinc-200/90 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+      <div className="border-b border-zinc-100 px-4 py-3.5 dark:border-zinc-800">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-3">
+            <div
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand-soft text-brand dark:bg-brand/15 dark:text-brand-on-dark"
+              aria-hidden
+            >
+              <Link2 className="h-4 w-4" strokeWidth={1.75} />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">Share with client</h3>
+              <p className="mt-0.5 truncate text-xs text-zinc-500 dark:text-zinc-400" title={galleryTitle}>
+                {galleryTitle}
+                <span className="text-zinc-300 dark:text-zinc-600"> · </span>
+                {eventDateLabel}
+              </p>
+            </div>
           </div>
-          <FormInput
-            readOnly
-            variant="borderless"
-            value={shareActive ? shareUrl : "Sharing not enabled yet."}
-            className="min-w-0 flex-1 [&_.ant-input]:!truncate [&_.ant-input]:!bg-transparent [&_.ant-input]:!px-2 [&_.ant-input]:!py-2.5 [&_.ant-input]:!font-mono [&_.ant-input]:!text-[11px] [&_.ant-input]:!text-zinc-200"
-            aria-label="Share URL"
-          />
-          <div className="flex shrink-0 divide-x divide-zinc-700 border-l border-zinc-700">
+          <span
+            className={cn(
+              "inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+              shareActive
+                ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
+                : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400",
+            )}
+          >
+            {shareActive ? (
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden />
+            ) : null}
+            {shareActive ? "Live" : "Off"}
+          </span>
+        </div>
+      </div>
+
+      <div className="space-y-4 p-4">
+        <p className="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+          {shareActive
+            ? shareClientAccessLine(clientName)
+            : "Turn on sharing from gallery settings to generate a client portal link."}
+        </p>
+
+        <div>
+          <p className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">Client portal link</p>
+          <div className="mt-1.5 flex overflow-hidden rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900">
+            <p
+              className="min-w-0 flex-1 truncate px-3 py-2.5 font-mono text-[11px] leading-none text-zinc-600 dark:text-zinc-300"
+              title={shareActive ? shareUrl : undefined}
+            >
+              {shareActive ? shareUrl : "Link not active yet"}
+            </p>
             <button
               type="button"
               disabled={!shareActive}
               onClick={onCopy}
-              className="inline-flex size-9 items-center justify-center bg-zinc-800 transition hover:bg-zinc-700 disabled:opacity-35"
-              aria-label={linkCopied ? "Copied" : "Copy link"}
+              className={cn(
+                "inline-flex shrink-0 items-center gap-1.5 border-l border-zinc-200 px-3 py-2.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700",
+                linkCopied
+                  ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
+                  : "bg-white text-zinc-800 hover:bg-zinc-100 dark:bg-zinc-950 dark:text-zinc-100 dark:hover:bg-zinc-900",
+              )}
             >
               {linkCopied ? (
-                <Check className="h-4 w-4 text-emerald-400" aria-hidden />
+                <Check className="h-3.5 w-3.5" aria-hidden />
               ) : (
-                <Copy className="h-4 w-4" aria-hidden />
+                <Copy className="h-3.5 w-3.5" aria-hidden />
               )}
-            </button>
-            {shareActive ? (
-              <a
-                href={shareUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex size-9 items-center justify-center bg-zinc-800 transition hover:bg-zinc-700"
-                aria-label="Open share link"
-              >
-                <ExternalLink className="h-4 w-4" aria-hidden />
-              </a>
-            ) : null}
-            <button
-              type="button"
-              disabled={busy}
-              onClick={onRegenerate}
-              className="inline-flex size-9 items-center justify-center bg-zinc-800 transition hover:bg-zinc-700 disabled:opacity-45"
-              aria-label="Regenerate link"
-            >
-              <RefreshCw className="h-4 w-4" aria-hidden />
+              {linkCopied ? "Copied" : "Copy"}
             </button>
           </div>
         </div>
+
+        {shareActive ? (
+          <div className="flex gap-2">
+            <a
+              href={buildMailtoShareUrl({
+                subject: `Gallery: ${galleryTitle}`,
+                body: shareMessage,
+              })}
+              className={quickActionClass}
+            >
+              <Mail className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              Email
+            </a>
+            <a
+              href={buildWhatsAppShareUrl(shareMessage)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={quickActionClass}
+            >
+              <MessageCircle className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              WhatsApp
+            </a>
+            <a
+              href={shareUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={cn(quickActionClass, "text-brand dark:text-brand-on-dark")}
+            >
+              <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              Open
+            </a>
+          </div>
+        ) : null}
+
+        <button
+          type="button"
+          disabled={busy || !shareActive}
+          onClick={onRegenerate}
+          className="inline-flex items-center gap-1.5 text-[11px] font-medium text-zinc-400 transition hover:text-zinc-600 disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-500 dark:hover:text-zinc-300"
+        >
+          <RefreshCw className={cn("h-3 w-3", busy && "animate-spin")} aria-hidden />
+          Regenerate link
+        </button>
       </div>
     </div>
   );

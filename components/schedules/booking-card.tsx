@@ -1,12 +1,9 @@
 "use client";
 
-import { Clock, MapPin, Pencil, Trash2 } from "lucide-react";
-import {
-  formatBookedTimeLabel,
-  KIND_META,
-  type BookedShoot,
-} from "@/components/schedules/booking-types";
-import { apiColorToDotClass } from "@/lib/bookings-api";
+import { Banknote, Clock, FileText, MapPin, Pencil, Trash2 } from "lucide-react";
+import { formatBookedTimeLabel, type BookedShoot } from "@/components/schedules/booking-types";
+import { formatBookingAmount } from "@/lib/bookings-api";
+import { bookingDotClass } from "@/lib/booking-shoot-types";
 import { cn } from "@/lib/utils";
 
 type BookingCardProps = {
@@ -15,11 +12,12 @@ type BookingCardProps = {
   className?: string;
   onEdit?: (shoot: BookedShoot) => void;
   onDelete?: (shoot: BookedShoot) => void;
+  onInvoice?: (shoot: BookedShoot) => void;
   deleting?: boolean;
 };
 
 function accentBarClass(shoot: BookedShoot): string {
-  return apiColorToDotClass(shoot.shootColor) ?? KIND_META[shoot.kind].dot;
+  return bookingDotClass(shoot.shootColor);
 }
 
 export function BookingCard({
@@ -28,10 +26,10 @@ export function BookingCard({
   className,
   onEdit,
   onDelete,
+  onInvoice,
   deleting,
 }: BookingCardProps) {
-  const meta = KIND_META[shoot.kind];
-  const Icon = meta.Icon;
+  const amountLabel = formatBookingAmount(shoot.amountCharged, shoot.currency);
 
   return (
     <article
@@ -55,8 +53,20 @@ export function BookingCard({
             </p>
           </div>
           <div className="flex shrink-0 items-start gap-1.5">
-            {(onEdit || onDelete) && !compact ? (
+            {(onEdit || onDelete || onInvoice) && !compact ? (
               <div className="flex items-center gap-1">
+                {onInvoice ? (
+                  <button
+                    type="button"
+                    onClick={() => onInvoice(shoot)}
+                    disabled={deleting}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200 text-zinc-600 transition hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-900"
+                    aria-label={`Invoice for ${shoot.title}`}
+                    title="Create invoice"
+                  >
+                    <FileText className="h-3.5 w-3.5" aria-hidden />
+                  </button>
+                ) : null}
                 {onEdit ? (
                   <button
                     type="button"
@@ -85,14 +95,12 @@ export function BookingCard({
                 ) : null}
               </div>
             ) : null}
-            <span
-              className={cn(
-                "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1",
-                meta.chip,
-              )}
-            >
-              <Icon className="h-3 w-3" aria-hidden />
-              {meta.label}
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-700 ring-1 ring-zinc-200 dark:bg-zinc-900 dark:text-zinc-200 dark:ring-zinc-700">
+              <span
+                className={cn("h-2 w-2 shrink-0 rounded-full", accentBarClass(shoot))}
+                aria-hidden
+              />
+              {shoot.shootTypeLabel}
             </span>
           </div>
         </div>
@@ -102,15 +110,21 @@ export function BookingCard({
             {formatBookedTimeLabel(shoot.startTime)}
             {shoot.endTime ? ` – ${formatBookedTimeLabel(shoot.endTime)}` : ""}
           </span>
+          {amountLabel ? (
+            <span className="inline-flex items-center gap-1.5 font-medium text-zinc-700 dark:text-zinc-300">
+              <Banknote className="h-3.5 w-3.5 shrink-0 text-zinc-400" aria-hidden />
+              {amountLabel}
+            </span>
+          ) : null}
           {shoot.location ? (
             <span className="inline-flex items-center gap-1.5">
               <MapPin className="h-3.5 w-3.5 shrink-0 text-zinc-400" aria-hidden />
               <span className="truncate">{shoot.location}</span>
             </span>
           ) : null}
-          {shoot.description && !compact ? (
+          {shoot.notes && !compact ? (
             <p className="mt-1 border-t border-zinc-100 pt-2 text-[11px] leading-snug text-zinc-600 dark:border-zinc-800 dark:text-zinc-300">
-              {shoot.description}
+              {shoot.notes}
             </p>
           ) : null}
         </div>
@@ -124,7 +138,7 @@ export function BookingDayPill({ shoot }: { shoot: BookedShoot }) {
   const bar = accentBarClass(shoot);
   return (
     <span
-      title={`${shoot.title}, ${formatBookedTimeLabel(shoot.startTime)}`}
+      title={`${shoot.title} · ${shoot.shootTypeLabel}, ${formatBookedTimeLabel(shoot.startTime)}`}
       className="flex min-w-0 items-center gap-1 rounded-md bg-zinc-100/95 px-1 py-0.5 dark:bg-zinc-800/90"
     >
       <span className={cn("h-2 w-0.5 shrink-0 rounded-full", bar)} aria-hidden />

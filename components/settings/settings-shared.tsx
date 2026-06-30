@@ -9,15 +9,18 @@ export function SettingsToggle({
   disabled,
   label,
   hint,
+  id,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
   disabled?: boolean;
   label: string;
   hint: string;
+  id?: string;
 }) {
   return (
     <label
+      id={id}
       className={cn(
         "flex items-center justify-between gap-4 rounded-xl border border-zinc-200 bg-zinc-50/50 px-4 py-3.5 dark:border-zinc-800 dark:bg-zinc-900/40",
         disabled && "opacity-60",

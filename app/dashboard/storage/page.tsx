@@ -7,20 +7,23 @@ import {
   ArrowDownWideNarrow,
   ArrowUpAZ,
   ArrowUpNarrowWide,
+  ChevronLeft,
+  ChevronRight,
   ExternalLink,
   FolderOpen,
-  ImageIcon,
-  Layers,
-  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
-  fetchUsageGalleries,
-  fetchUsageSummary,
-  type UsageGalleryRow,
-  type UsageSummaryResponse,
-  UsageApiError,
-} from "@/lib/usage-api";
+  DashboardPageHeader,
+  dashboardPageHeaderDescriptionClassName,
+  dashboardPageHeaderTitleClassName,
+} from "@/components/dashboard/dashboard-page-header";
+import {
+  fetchStorage,
+  StorageApiError,
+  type StorageGalleryRow,
+  type StorageSummary,
+} from "@/lib/storage-api";
 import { getActivePlanDefinition } from "@/lib/subscription-plan";
 
 function formatBytes(bytes: number): string {
@@ -50,33 +53,17 @@ function formatPercentDisplay(value: number): string {
 
 type SortKey = "name" | "total";
 
-function summaryPercents(summary: UsageSummaryResponse): {
-  raw: number;
-  selection: number;
-  finals: number;
-} {
-  const total = summary.total_storage_bytes;
-  const bc = summary.by_category;
-  return {
-    raw: bc?.raws?.percent_of_total ?? pct(summary.raws_size_bytes, total),
-    selection:
-      bc?.selections?.percent_of_total ?? pct(summary.selections_size_bytes, total),
-    finals: bc?.finals?.percent_of_total ?? pct(summary.finals_size_bytes, total),
-  };
-}
+const PAGE_SIZE = 15;
 
-function mapGalleryToRow(g: UsageGalleryRow) {
-  const total =
-    g.total_size_bytes ||
-    g.raws_size_bytes + g.selections_size_bytes + g.finals_size_bytes;
+function mapGalleryToRow(g: StorageGalleryRow) {
   return {
     id: g.id,
     eventName: g.name || "N/A",
-    clientName: g.client?.name?.trim() || "N/A",
-    bytesRaw: g.raws_size_bytes,
-    bytesSelection: g.selections_size_bytes,
-    bytesFinals: g.finals_size_bytes,
-    total,
+    clientName: g.clientName?.trim() || "N/A",
+    bytesRaw: g.rawsBytes,
+    bytesSelection: g.selectionsBytes,
+    bytesFinals: g.finalsBytes,
+    total: g.totalBytes,
   };
 }
 
@@ -85,100 +72,86 @@ export default function StoragePage() {
   const [sortKey, setSortKey] = useState<SortKey>("total");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
-  const [summary, setSummary] = useState<UsageSummaryResponse | null>(null);
+  const [summary, setSummary] = useState<StorageSummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [summaryError, setSummaryError] = useState<string | null>(null);
 
-  const [galleries, setGalleries] = useState<UsageGalleryRow[]>([]);
+  const [galleries, setGalleries] = useState<StorageGalleryRow[]>([]);
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
 
   const [listVersion, setListVersion] = useState(0);
+  const [page, setPage] = useState(1);
 
-  const loadSummary = useCallback(async () => {
-    setSummaryError(null);
-    setSummaryLoading(true);
-    try {
-      const data = await fetchUsageSummary();
-      setSummary(data);
-    } catch (err) {
-      setSummary(null);
-      setSummaryError(
-        err instanceof UsageApiError
-          ? err.message
-          : err instanceof Error
-            ? err.message
-            : "Could not load usage summary.",
-      );
-    } finally {
-      setSummaryLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadSummary();
-  }, [loadSummary]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    async function loadList() {
+  const loadStorage = useCallback(
+    async (signal?: AbortSignal) => {
+      setSummaryError(null);
       setListError(null);
+      setSummaryLoading(true);
       setListLoading(true);
       try {
-        if (sortKey === "total") {
-          const res = await fetchUsageGalleries({
-            sortBy: "total_size",
-            order: sortDir,
-            signal: controller.signal,
-          });
-          if (!controller.signal.aborted) setGalleries(res.galleries);
-        } else {
-          const res = await fetchUsageGalleries({
-            sortBy: "total_size",
-            order: "desc",
-            signal: controller.signal,
-          });
-          if (controller.signal.aborted) return;
-          const sorted = [...res.galleries].sort((a, b) => {
-            const cmp = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-            return sortDir === "asc" ? cmp : -cmp;
-          });
-          setGalleries(sorted);
-        }
+        const sort = sortKey === "total" ? "size" : "name";
+        const data = await fetchStorage({ sort, order: sortDir, signal });
+        if (signal?.aborted) return;
+        setSummary(data.summary);
+        setGalleries(data.galleries);
       } catch (err) {
-        if (controller.signal.aborted) return;
+        if (signal?.aborted) return;
+        setSummary(null);
         setGalleries([]);
-        setListError(
-          err instanceof UsageApiError
+        const message =
+          err instanceof StorageApiError
             ? err.message
             : err instanceof Error
               ? err.message
-              : "Could not load gallery usage.",
-        );
+              : "Could not load storage.";
+        setSummaryError(message);
+        setListError(message);
       } finally {
-        if (!controller.signal.aborted) setListLoading(false);
+        if (!signal?.aborted) {
+          setSummaryLoading(false);
+          setListLoading(false);
+        }
       }
-    }
-    void loadList();
+    },
+    [sortKey, sortDir],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadStorage(controller.signal);
     return () => controller.abort();
-  }, [sortKey, sortDir, listVersion]);
+  }, [loadStorage, listVersion]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [sortKey, sortDir]);
 
   const sortedRows = useMemo(() => galleries.map(mapGalleryToRow), [galleries]);
 
-  const totals = useMemo(() => {
-    if (!summary) {
-      return { raw: 0, selection: 0, finals: 0, used: 0, percents: { raw: 0, selection: 0, finals: 0 } };
-    }
-    const used = summary.total_storage_bytes;
-    const percents = summaryPercents(summary);
+  const { pageRows, totalPages, rangeStart, rangeEnd, displayPage } = useMemo(() => {
+    const total = sortedRows.length;
+    const tp = Math.max(1, Math.ceil(total / PAGE_SIZE) || 1);
+    const safePage = Math.min(page, tp);
+    const start = (safePage - 1) * PAGE_SIZE;
+    const slice = sortedRows.slice(start, start + PAGE_SIZE);
     return {
-      raw: summary.raws_size_bytes,
-      selection: summary.selections_size_bytes,
-      finals: summary.finals_size_bytes,
-      used,
-      percents,
+      pageRows: slice,
+      totalPages: tp,
+      rangeStart: total === 0 ? 0 : start + 1,
+      rangeEnd: Math.min(start + PAGE_SIZE, total),
+      displayPage: safePage,
     };
-  }, [summary]);
+  }, [sortedRows, page]);
+
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(sortedRows.length / PAGE_SIZE) || 1);
+    setPage((p) => Math.min(p, maxPage));
+  }, [sortedRows.length]);
+
+  const usedBytes = summary?.usedBytes ?? 0;
+  const planBytes = summary?.limitBytes ?? plan.storageBytes;
+  const planLabel = summary?.planName ?? plan.label;
 
   function toggleSort(key: SortKey) {
     setSortKey((prev) => {
@@ -195,113 +168,63 @@ export default function StoragePage() {
 
   return (
     <div className="dashboard-page space-y-6">
-      <section className="relative overflow-hidden rounded-2xl border border-slate-800/50 bg-gradient-to-br from-slate-950 via-indigo-950/85 to-slate-900 shadow-lg shadow-slate-900/20">
-        <div
-          className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-brand/15 blur-3xl"
-          aria-hidden
-        />
-        <div className="relative space-y-4 p-5 sm:p-6">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-[1.65rem]">
-              Storage
-            </h1>
-            <p className="mt-1.5 text-sm text-slate-400">
-              Raws, selections, and finals across all galleries.
-            </p>
-          </div>
+      <DashboardPageHeader innerClassName="space-y-4">
+        <div>
+          <h1 className={dashboardPageHeaderTitleClassName()}>Storage</h1>
+          <p className={dashboardPageHeaderDescriptionClassName("mt-1.5")}>
+            Raws, selections, and finals across all galleries.
+          </p>
+        </div>
 
-          {summaryError ? (
-            <div className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">
-              {summaryError}
-              <button
-                type="button"
-                className="ml-3 font-semibold underline"
-                onClick={() => void loadSummary()}
-              >
-                Retry
-              </button>
-            </div>
-          ) : summaryLoading ? (
-            <div className="space-y-3">
-              <div className="h-9 w-32 animate-pulse rounded-lg bg-white/10" />
-              <div className="h-2 animate-pulse rounded-full bg-white/10" />
-              <div className="grid grid-cols-3 gap-2">
-                {[0, 1, 2].map((i) => (
-                  <div key={i} className="h-16 animate-pulse rounded-xl bg-white/10" />
-                ))}
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="flex flex-wrap items-end justify-between gap-3">
-                <div>
-                  <p className="text-3xl font-semibold tabular-nums tracking-tight text-white">
-                    {formatBytes(totals.used)}
-                  </p>
-                  <p className="mt-0.5 text-sm text-slate-400">
-                    of {formatBytes(plan.storageBytes)}, {plan.label}
-                  </p>
-                </div>
-                <p className="text-xs font-medium text-slate-500">
-                  {formatPercentDisplay(pct(totals.used, plan.storageBytes))} of plan
+        {summaryError ? (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
+            {summaryError}
+            <button
+              type="button"
+              className="ml-3 font-semibold underline"
+              onClick={() => void loadStorage()}
+            >
+              Retry
+            </button>
+          </div>
+        ) : summaryLoading ? (
+          <div className="space-y-3">
+            <div className="h-9 w-32 animate-pulse rounded-lg bg-zinc-200/80 dark:bg-zinc-800" />
+            <div className="h-2 animate-pulse rounded-full bg-zinc-200/80 dark:bg-zinc-800" />
+          </div>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <p className="font-display text-3xl font-medium tabular-nums tracking-tight text-zinc-900 dark:text-zinc-50">
+                  {formatBytes(usedBytes)}
+                </p>
+                <p className="mt-0.5 text-sm text-zinc-600 dark:text-zinc-400">
+                  of {formatBytes(planBytes)}, {planLabel}
                 </p>
               </div>
+              <p className="text-xs font-medium uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-500">
+                {formatPercentDisplay(pct(usedBytes, planBytes))} of plan
+              </p>
+            </div>
+            <div
+              className="h-2 overflow-hidden rounded-full bg-zinc-200/80 dark:bg-zinc-800"
+              role="progressbar"
+              aria-valuenow={pct(usedBytes, planBytes)}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label="Storage used"
+            >
               <div
-                className="h-2 overflow-hidden rounded-full bg-white/10"
-                role="progressbar"
-                aria-valuenow={pct(totals.used, plan.storageBytes)}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-label="Storage used"
-              >
-                <div
-                  className="h-full rounded-full bg-brand transition-[width]"
-                  style={{
-                    width: `${Math.min(100, pct(totals.used, plan.storageBytes))}%`,
-                  }}
-                />
-              </div>
-              <dl className="grid grid-cols-3 gap-2 sm:gap-3">
-                {(["raw", "selection", "finals"] as const).map((key) => {
-                  const label =
-                    key === "raw" ? "Raws" : key === "selection" ? "Selections" : "Finals";
-                  const Icon =
-                    key === "raw" ? Layers : key === "selection" ? ImageIcon : Sparkles;
-                  const bytes =
-                    key === "raw"
-                      ? totals.raw
-                      : key === "selection"
-                        ? totals.selection
-                        : totals.finals;
-                  const share =
-                    key === "raw"
-                      ? totals.percents.raw
-                      : key === "selection"
-                        ? totals.percents.selection
-                        : totals.percents.finals;
-                  return (
-                    <div
-                      key={key}
-                      className="rounded-xl border border-white/10 bg-white/5 px-3 py-2.5"
-                    >
-                      <dt className="flex items-center gap-1.5 text-[11px] font-medium text-slate-400">
-                        <Icon className="h-3 w-3 shrink-0" aria-hidden />
-                        {label}
-                      </dt>
-                      <dd className="mt-1 text-sm font-semibold tabular-nums text-white">
-                        {formatBytes(bytes)}
-                      </dd>
-                      <dd className="text-[10px] text-slate-500">
-                        {formatPercentDisplay(share)} of uploads
-                      </dd>
-                    </div>
-                  );
-                })}
-              </dl>
-            </>
-          )}
-        </div>
-      </section>
+                className="h-full rounded-full bg-brand transition-[width]"
+                style={{
+                  width: `${Math.min(100, pct(usedBytes, planBytes))}%`,
+                }}
+              />
+            </div>
+          </>
+        )}
+      </DashboardPageHeader>
 
       <section className="overflow-hidden rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
         <div className="flex flex-col gap-4 border-b border-zinc-100 px-5 py-4 dark:border-zinc-800 sm:flex-row sm:items-center sm:justify-between sm:px-6">
@@ -313,6 +236,13 @@ export default function StoragePage() {
               <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
                 Per-gallery usage
               </h2>
+              {!listLoading && sortedRows.length > 0 ? (
+                <p className="mt-0.5 text-sm text-zinc-500 dark:text-zinc-400">
+                  {sortedRows.length === 1
+                    ? "1 gallery"
+                    : `${sortedRows.length} galleries`}
+                </p>
+              ) : null}
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -383,7 +313,7 @@ export default function StoragePage() {
         ) : (
           <>
             <div className="divide-y divide-zinc-100 dark:divide-zinc-800 md:hidden">
-              {sortedRows.map((row) => (
+              {pageRows.map((row) => (
                 <div key={row.id} className="space-y-3 px-5 py-4 sm:px-6">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -453,7 +383,7 @@ export default function StoragePage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                  {sortedRows.map((row) => (
+                  {pageRows.map((row) => (
                     <tr
                       key={row.id}
                       className="transition-colors hover:bg-zinc-50/80 dark:hover:bg-zinc-900/40"
@@ -490,6 +420,45 @@ export default function StoragePage() {
                 </tbody>
               </table>
             </div>
+
+            {sortedRows.length > PAGE_SIZE ? (
+              <div className="flex flex-col gap-4 border-t border-zinc-100 px-5 py-4 dark:border-zinc-800 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+                <p className="text-center text-xs font-medium text-zinc-600 sm:text-left dark:text-zinc-400">
+                  {`${rangeStart}–${rangeEnd} of ${sortedRows.length} galleries`}
+                </p>
+                <div className="inline-flex items-center justify-center rounded-full border border-zinc-200 bg-white p-0.5 shadow-sm dark:border-zinc-700 dark:bg-zinc-950 sm:justify-end">
+                  <button
+                    type="button"
+                    disabled={displayPage <= 1}
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-full text-zinc-600 transition hover:bg-zinc-100 disabled:opacity-40 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    aria-label="Previous page"
+                  >
+                    <ChevronLeft className="h-4 w-4" aria-hidden />
+                  </button>
+                  <span className="min-w-[5.5rem] px-1 text-center text-xs font-medium tabular-nums text-zinc-600 dark:text-zinc-300">
+                    {displayPage} / {totalPages}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={displayPage >= totalPages}
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-full text-zinc-600 transition hover:bg-zinc-100 disabled:opacity-40 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    aria-label="Next page"
+                  >
+                    <ChevronRight className="h-4 w-4" aria-hidden />
+                  </button>
+                </div>
+              </div>
+            ) : sortedRows.length > 0 ? (
+              <div className="border-t border-zinc-100 px-5 py-4 dark:border-zinc-800 sm:px-6">
+                <p className="text-xs font-medium text-zinc-600 dark:text-zinc-400">
+                  {sortedRows.length === 1
+                    ? "1 gallery"
+                    : `${rangeStart}–${rangeEnd} of ${sortedRows.length} galleries`}
+                </p>
+              </div>
+            ) : null}
           </>
         )}
       </section>

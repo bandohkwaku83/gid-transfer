@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { ImagePlus, Save } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ImagePlus, Move, Save } from "lucide-react";
 import { LogoCropEditor } from "@/components/settings/logo-crop-editor";
 import { SettingsToggle } from "@/components/settings/settings-shared";
 import { useToast } from "@/components/toast-provider";
@@ -9,12 +9,13 @@ import { renderWatermarkPreviewDataUrl } from "@/lib/apply-brand-watermark";
 import {
   defaultBrandWatermarkSettings,
   normalizeBrandWatermarkSettings,
-  WATERMARK_POSITIONS,
+  watermarkLogoMetrics,
+  watermarkLogoPlacement,
   type BrandWatermarkSettings,
-  type WatermarkPosition,
+  type WatermarkLogoCrop,
   type WatermarkTemplateSettings,
 } from "@/lib/watermark-brand";
-import { updateSettings, type ApiSettings } from "@/lib/settings-api";
+import { updateWatermarkSettings } from "@/lib/watermark-api";
 import { cn } from "@/lib/utils";
 
 const PORTRAIT_SAMPLE =
@@ -24,53 +25,154 @@ const LANDSCAPE_SAMPLE =
 
 type TemplateTab = "portrait" | "landscape";
 
-function PositionPicker({
-  value,
-  onChange,
+function clamp01(n: number) {
+  return Math.min(1, Math.max(0, n));
+}
+
+function WatermarkPlacementPreview({
+  sampleUrl,
+  logoDataUrl,
+  crop,
+  template,
+  onPositionChange,
   disabled,
+  aspectRatio,
 }: {
-  value: WatermarkPosition;
-  onChange: (p: WatermarkPosition) => void;
+  sampleUrl: string;
+  logoDataUrl: string;
+  crop: WatermarkLogoCrop | null;
+  template: WatermarkTemplateSettings;
+  onPositionChange: (posX: number, posY: number) => void;
   disabled?: boolean;
+  aspectRatio: string;
 }) {
-  const grid: (WatermarkPosition | null)[][] = [
-    ["top-left", null, "top-right"],
-    [null, "center", null],
-    ["bottom-left", null, "bottom-right"],
-  ];
+  const frameRef = useRef<HTMLDivElement>(null);
+  const [frameSize, setFrameSize] = useState({ w: 1, h: 1 });
+  const [logoSize, setLogoSize] = useState({ w: 1, h: 1 });
+  const draggingRef = useRef(false);
+
+  useEffect(() => {
+    const el = frameRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      if (width > 0 && height > 0) setFrameSize({ w: width, h: height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const { logoW, logoH } = watermarkLogoMetrics(
+    frameSize.w,
+    frameSize.h,
+    logoSize.w,
+    logoSize.h,
+    template.sizePercent,
+  );
+  const { x, y } = watermarkLogoPlacement(
+    template.posX,
+    template.posY,
+    frameSize.w,
+    frameSize.h,
+    logoW,
+    logoH,
+  );
+
+  const placeFromPointer = useCallback(
+    (clientX: number, clientY: number) => {
+      const el = frameRef.current;
+      if (!el || disabled) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      onPositionChange(
+        clamp01((clientX - rect.left) / rect.width),
+        clamp01((clientY - rect.top) / rect.height),
+      );
+    },
+    [disabled, onPositionChange],
+  );
+
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (disabled) return;
+      e.preventDefault();
+      draggingRef.current = true;
+      e.currentTarget.setPointerCapture(e.pointerId);
+      placeFromPointer(e.clientX, e.clientY);
+    },
+    [disabled, placeFromPointer],
+  );
+
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      if (!draggingRef.current || disabled) return;
+      placeFromPointer(e.clientX, e.clientY);
+    },
+    [disabled, placeFromPointer],
+  );
+
+  const onPointerUp = useCallback((e: React.PointerEvent) => {
+    draggingRef.current = false;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+  }, []);
+
+  const cropStyle = crop
+    ? {
+        objectPosition: `${-crop.x * 100}% ${-crop.y * 100}%`,
+        width: `${100 / crop.w}%`,
+        height: `${100 / crop.h}%`,
+        maxWidth: "none",
+        maxHeight: "none",
+      }
+    : undefined;
 
   return (
-    <div className="inline-grid grid-cols-3 gap-1.5 rounded-xl border border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-700 dark:bg-zinc-900/50">
-      {grid.flat().map((pos, i) => {
-        if (!pos) {
-          return <div key={`spacer-${i}`} className="h-10 w-10" aria-hidden />;
-        }
-        const active = value === pos;
-        const label = WATERMARK_POSITIONS.find((p) => p.id === pos)?.label ?? pos;
-        return (
-          <button
-            key={pos}
-            type="button"
-            disabled={disabled}
-            title={label}
-            aria-label={label}
-            aria-pressed={active}
-            onClick={() => onChange(pos)}
-            className={cn(
-              "h-10 w-10 rounded-lg border-2 text-[10px] font-semibold transition",
-              active
-                ? "border-brand bg-brand text-white"
-                : "border-transparent bg-white text-zinc-400 hover:border-zinc-300 hover:text-zinc-600 dark:bg-zinc-800 dark:hover:border-zinc-600",
-            )}
-          >
-            {pos === "top-left" && "↖"}
-            {pos === "top-right" && "↗"}
-            {pos === "center" && "◎"}
-            {pos === "bottom-left" && "↙"}
-            {pos === "bottom-right" && "↘"}
-          </button>
-        );
-      })}
+    <div className="min-w-0">
+      <p className="mb-2 flex items-center gap-1.5 text-xs font-medium text-zinc-500">
+        <Move className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        Drag the logo anywhere on the preview
+      </p>
+      <div
+        ref={frameRef}
+        className={cn(
+          "relative mx-auto cursor-crosshair overflow-hidden rounded-xl border border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900",
+          disabled && "pointer-events-none opacity-60",
+          aspectRatio === "3/4" ? "max-w-[220px]" : "max-w-[300px]",
+        )}
+        style={{ aspectRatio }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={sampleUrl} alt="" className="block h-full w-full object-cover select-none" draggable={false} />
+        <div
+          className="absolute touch-none"
+          style={{
+            left: `${(x / frameSize.w) * 100}%`,
+            top: `${(y / frameSize.h) * 100}%`,
+            width: `${(logoW / frameSize.w) * 100}%`,
+            height: `${(logoH / frameSize.h) * 100}%`,
+            opacity: template.opacity / 100,
+          }}
+        >
+          <div className="relative h-full w-full overflow-hidden">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={logoDataUrl}
+              alt="Logo placement"
+              className="absolute left-0 top-0 h-full w-full object-contain select-none"
+              style={cropStyle}
+              draggable={false}
+              onLoad={(e) => {
+                const t = e.currentTarget;
+                setLogoSize({ w: t.naturalWidth, h: t.naturalHeight });
+              }}
+            />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -121,15 +223,22 @@ function SliderRow({
 
 type WatermarkBrandPanelProps = {
   initial: BrandWatermarkSettings | undefined;
-  onSaved: (settings: ApiSettings) => void;
+  onSaved: (settings: BrandWatermarkSettings) => void;
   disabled?: boolean;
+  showPrerequisiteHint?: boolean;
 };
 
-export function WatermarkBrandPanel({ initial, onSaved, disabled }: WatermarkBrandPanelProps) {
+export function WatermarkBrandPanel({
+  initial,
+  onSaved,
+  disabled,
+  showPrerequisiteHint = false,
+}: WatermarkBrandPanelProps) {
   const { showToast } = useToast();
   const [draft, setDraft] = useState<BrandWatermarkSettings>(() =>
     normalizeBrandWatermarkSettings(initial ?? defaultBrandWatermarkSettings()),
   );
+  const [pendingLogoFile, setPendingLogoFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [templateTab, setTemplateTab] = useState<TemplateTab>("portrait");
   const [showCrop, setShowCrop] = useState(false);
@@ -138,6 +247,7 @@ export function WatermarkBrandPanel({ initial, onSaved, disabled }: WatermarkBra
 
   useEffect(() => {
     setDraft(normalizeBrandWatermarkSettings(initial ?? defaultBrandWatermarkSettings()));
+    setPendingLogoFile(null);
   }, [initial]);
 
   const activeTemplate =
@@ -190,6 +300,7 @@ export function WatermarkBrandPanel({ initial, onSaved, disabled }: WatermarkBra
     reader.onload = () => {
       const url = typeof reader.result === "string" ? reader.result : null;
       if (!url) return;
+      setPendingLogoFile(file);
       setDraft((d) => ({
         ...d,
         logoDataUrl: url,
@@ -207,8 +318,13 @@ export function WatermarkBrandPanel({ initial, onSaved, disabled }: WatermarkBra
     }
     setSaving(true);
     try {
-      const data = await updateSettings({ brandWatermark: draft });
-      onSaved(data);
+      const saved = await updateWatermarkSettings({
+        settings: draft,
+        logoFile: pendingLogoFile,
+      });
+      setDraft(saved);
+      setPendingLogoFile(null);
+      onSaved(saved);
       showToast("Saved.", "success");
     } catch (e) {
       showToast(e instanceof Error ? e.message : "Could not save.", "error");
@@ -222,7 +338,13 @@ export function WatermarkBrandPanel({ initial, onSaved, disabled }: WatermarkBra
 
   return (
     <div className="space-y-6">
+      {showPrerequisiteHint ? (
+        <p className="text-xs leading-relaxed text-amber-800 dark:text-amber-200/90">
+          Required before you can watermark finals from a gallery upload.
+        </p>
+      ) : null}
       <SettingsToggle
+        id="settings-brand-watermark"
         checked={draft.enabled}
         onChange={(enabled) => setDraft((d) => ({ ...d, enabled }))}
         disabled={busy}
@@ -268,7 +390,10 @@ export function WatermarkBrandPanel({ initial, onSaved, disabled }: WatermarkBra
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => setDraft((d) => ({ ...d, logoDataUrl: null, crop: null }))}
+                    onClick={() => {
+                      setDraft((d) => ({ ...d, logoDataUrl: null, crop: null }));
+                      setPendingLogoFile(null);
+                    }}
                     className="rounded-lg border border-zinc-200 px-3 py-2 text-xs font-semibold text-zinc-600 hover:bg-zinc-50 dark:border-zinc-600 dark:text-zinc-300"
                   >
                     Remove
@@ -329,15 +454,15 @@ export function WatermarkBrandPanel({ initial, onSaved, disabled }: WatermarkBra
                   2. Where it appears
                 </p>
                 <p className="mt-0.5 text-xs text-zinc-500">
-                  Tall and wide photos can use different settings. Pick a type, adjust, then save.
+                  Portrait and landscape photos can use different settings. Pick a type, adjust, then save.
                 </p>
               </div>
 
               <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-50 p-1 dark:border-zinc-700 dark:bg-zinc-900/50">
                 {(
                   [
-                    ["portrait", "Tall photos"],
-                    ["landscape", "Wide photos"],
+                    ["portrait", "Portrait"],
+                    ["landscape", "Landscape"],
                   ] as const
                 ).map(([id, label]) => (
                   <button
@@ -357,20 +482,8 @@ export function WatermarkBrandPanel({ initial, onSaved, disabled }: WatermarkBra
                 ))}
               </div>
 
-              <div className="grid gap-6 lg:grid-cols-[auto_1fr] lg:items-start">
+              <div className="grid gap-6 lg:grid-cols-[1fr_auto] lg:items-start">
                 <div className="space-y-4">
-                  <div>
-                    <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">Corner</p>
-                    <p className="mt-0.5 text-xs text-zinc-500">Tap where the logo should sit.</p>
-                    <div className="mt-2">
-                      <PositionPicker
-                        value={activeTemplate.position}
-                        onChange={(position) => updateActiveTemplate({ position })}
-                        disabled={busy}
-                      />
-                    </div>
-                  </div>
-
                   <SliderRow
                     label="Logo size"
                     hint="How large the logo is on the photo."
@@ -384,7 +497,7 @@ export function WatermarkBrandPanel({ initial, onSaved, disabled }: WatermarkBra
                   />
 
                   <SliderRow
-                    label="Visibility"
+                    label="Opacity"
                     hint="Lower = more subtle; higher = more obvious."
                     value={activeTemplate.opacity}
                     min={10}
@@ -396,30 +509,40 @@ export function WatermarkBrandPanel({ initial, onSaved, disabled }: WatermarkBra
                   />
                 </div>
 
-                <div className="min-w-0">
-                  <p className="mb-2 text-xs font-medium text-zinc-500">Example preview</p>
-                  <div
-                    className={cn(
-                      "overflow-hidden rounded-xl border border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900",
-                      templateTab === "portrait" ? "max-w-[200px]" : "max-w-[280px]",
-                    )}
-                    style={{ aspectRatio: templateTab === "portrait" ? "3/4" : "4/3" }}
-                  >
-                    {previewBusy ? (
-                      <div className="h-full w-full animate-pulse bg-zinc-200 dark:bg-zinc-800" />
-                    ) : previewUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={previewUrl}
-                        alt="Preview"
-                        className="h-full w-full object-contain"
-                      />
-                    ) : (
-                      <div className="flex h-full min-h-[120px] items-center justify-center text-xs text-zinc-400">
-                        Preview loading…
-                      </div>
-                    )}
-                  </div>
+                <WatermarkPlacementPreview
+                  sampleUrl={sampleUrl}
+                  logoDataUrl={draft.logoDataUrl!}
+                  crop={draft.crop}
+                  template={activeTemplate}
+                  onPositionChange={(posX, posY) => updateActiveTemplate({ posX, posY })}
+                  disabled={busy}
+                  aspectRatio={templateTab === "portrait" ? "3/4" : "4/3"}
+                />
+              </div>
+
+              <div className="min-w-0">
+                <p className="mb-2 text-xs font-medium text-zinc-500">Final preview</p>
+                <div
+                  className={cn(
+                    "overflow-hidden rounded-xl border border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900",
+                    templateTab === "portrait" ? "max-w-[200px]" : "max-w-[280px]",
+                  )}
+                  style={{ aspectRatio: templateTab === "portrait" ? "3/4" : "4/3" }}
+                >
+                  {previewBusy ? (
+                    <div className="h-full w-full animate-pulse bg-zinc-200 dark:bg-zinc-800" />
+                  ) : previewUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={previewUrl}
+                      alt="Preview"
+                      className="h-full w-full object-contain"
+                    />
+                  ) : (
+                    <div className="flex h-full min-h-[120px] items-center justify-center text-xs text-zinc-400">
+                      Preview loading…
+                    </div>
+                  )}
                 </div>
               </div>
             </section>

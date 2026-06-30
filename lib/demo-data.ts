@@ -1,4 +1,5 @@
 import type { GalleryCoverFrame } from "@/lib/gallery-cover-frame";
+import type { GalleryImageLayout } from "@/lib/gallery-image-layout";
 
 export type SelectionState = "UNSELECTED" | "SELECTED";
 export type EditState = "NONE" | "IN_PROGRESS" | "EDITED";
@@ -21,10 +22,16 @@ export type DemoAsset = {
   photographerReply?: string;
   hasEdited: boolean;
   thumbUrl: string;
+  /** Full-quality file URL — used as grid fallback while thumbnails process. */
+  url?: string;
   /** ISO timestamp when the client selected/hearted this item. */
   selectedAt?: string | null;
+  /** Watermarked client preview when distinct from thumb. */
+  displayUrl?: string;
   /** Full-screen preview URL when better than {@link thumbUrl} (share galleries / API). */
   previewUrl?: string;
+  /** False while thumbnails / watermarked previews are still processing. */
+  derivativesReady?: boolean;
   editedPreviewUrl?: string;
   /** Raw upload or selection row is a video file. */
   isVideo?: boolean;
@@ -102,20 +109,31 @@ export type FolderOverride = Partial<DemoProject> & {
   coverFrame?: GalleryCoverFrame;
   /** Cover backdrop color (demo — stored only in overrides). */
   coverColor?: string;
+  /** Default client grid layout (demo — stored only in overrides). */
+  imageLayout?: GalleryImageLayout;
   /** Permanently hidden after trash purge (demo). */
   purged?: boolean;
   /** Demo-only streamed URL for gallery background music. */
   demoBackgroundMusicUrl?: string;
   /** Demo-only photographer replies keyed by `sel:<photoId>` or `fin:<finalId>`. */
   feedbackReplies?: Record<string, string>;
+  /** Per-gallery watermark for finals (demo UI). */
+  watermarkFinalsEnabled?: boolean;
   /** Named subsections within this demo gallery. */
   gallerySets?: DemoGallerySet[];
   /** Demo-only set assignment when not stored on the asset row. */
   assetSetIds?: Record<string, string | null>;
   finalSetIds?: Record<string, string | null>;
+  /** Gallery blog posts (demo — stored in overrides). */
+  galleryBlogPosts?: import("@/lib/gallery-blog").GalleryBlogPost[];
   /** Client gallery 4-digit gate (demo — stored in overrides). */
   sharePasswordEnabled?: boolean;
   shareAccessPin?: string;
+  /** Per-gallery preview watermark for client originals (demo — stored in overrides). */
+  watermarkPreviewEnabled?: boolean;
+  /** When true, the client share link is live (demo — stored in overrides). */
+  shareEnabled?: boolean;
+  shareSharedAt?: string;
 };
 
 const OVERRIDE_ONLY_FIELDS = new Set([
@@ -131,11 +149,17 @@ const OVERRIDE_ONLY_FIELDS = new Set([
   "coverFocalY",
   "coverFrame",
   "coverColor",
+  "imageLayout",
   "gallerySets",
   "assetSetIds",
   "finalSetIds",
+  "galleryBlogPosts",
   "sharePasswordEnabled",
   "shareAccessPin",
+  "shareEnabled",
+  "shareSharedAt",
+  "watermarkFinalsEnabled",
+  "watermarkPreviewEnabled",
 ]);
 
 function emptyFinals(): DemoFinalAsset[] {
@@ -225,6 +249,41 @@ export const SEED_PROJECTS: DemoProject[] = [
         clientComment: "",
         hasEdited: false,
         thumbUrl: "https://picsum.photos/seed/portrait2/900/700",
+      },
+    ],
+    finalAssets: emptyFinals(),
+  },
+  {
+    id: "p-engagement",
+    clientName: "Engagement — Adwoa & Yaw",
+    contactEmail: "adwoa.engagement@client.gido",
+    shareToken: "demo-adwoa-engagement",
+    createdAt: "2026-06-18T08:00:00.000Z",
+    eventDate: "2026-06-19",
+    description: "Sunset engagement portraits.",
+    updatedAt: "2026-06-27T16:45:00.000Z",
+    status: "SELECTION_PENDING",
+    selectionSubmitted: true,
+    sharePasswordEnabled: false,
+    shareExpiryDays: 14,
+    assets: [
+      {
+        id: "en-1",
+        originalName: "sunset_01.jpg",
+        selection: "SELECTED",
+        editState: "NONE",
+        clientComment: "Love this angle.",
+        hasEdited: false,
+        thumbUrl: "/images/gallery-covers/IMG_5261.JPG",
+      },
+      {
+        id: "en-2",
+        originalName: "sunset_02.jpg",
+        selection: "SELECTED",
+        editState: "NONE",
+        clientComment: "",
+        hasEdited: false,
+        thumbUrl: "https://picsum.photos/seed/engagement2/900/700",
       },
     ],
     finalAssets: emptyFinals(),
@@ -429,6 +488,49 @@ export function deleteDemoGallerySet(folderId: string, setId: string): void {
     saveProjectSnapshot({ ...project, assets, finalAssets });
   }
   patchFolderOverride(folderId, { gallerySets, assetSetIds, finalSetIds });
+}
+
+function reorderDemoProjectMedia<T extends { id: string }>(
+  folderId: string,
+  orderedIds: string[],
+  pick: (project: DemoProject) => T[],
+  save: (project: DemoProject, next: T[]) => DemoProject,
+): void {
+  const project = loadProjectById(folderId);
+  if (!project) return;
+  const current = pick(project);
+  const byId = new Map(current.map((row) => [row.id, row]));
+  const next: T[] = [];
+  const used = new Set<string>();
+  for (const id of orderedIds) {
+    const row = byId.get(id);
+    if (row) {
+      next.push(row);
+      used.add(id);
+    }
+  }
+  for (const row of current) {
+    if (!used.has(row.id)) next.push(row);
+  }
+  saveProjectSnapshot(save(project, next));
+}
+
+export function reorderDemoProjectRawMedia(folderId: string, orderedIds: string[]): void {
+  reorderDemoProjectMedia(
+    folderId,
+    orderedIds,
+    (project) => project.assets,
+    (project, assets) => ({ ...project, assets }),
+  );
+}
+
+export function reorderDemoProjectFinalMedia(folderId: string, orderedIds: string[]): void {
+  reorderDemoProjectMedia(
+    folderId,
+    orderedIds,
+    (project) => project.finalAssets,
+    (project, finalAssets) => ({ ...project, finalAssets }),
+  );
 }
 
 function resolveDemoAssetSetId(

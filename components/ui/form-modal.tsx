@@ -1,13 +1,19 @@
 "use client";
 
+import Image from "next/image";
 import type { FormEvent, ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 import { X } from "lucide-react";
+import {
+  onboardingLabelClass,
+  onboardingPrimaryButtonClassName,
+} from "@/lib/onboarding-field-styles";
 import { cn } from "@/lib/utils";
 
-/** Shared field styles for create / edit modals */
-export const formModalInputClass =
-  "mt-2 w-full rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 text-sm text-zinc-900 shadow-sm outline-none transition placeholder:text-zinc-400 focus:border-brand focus:ring-2 focus:ring-brand/20 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:placeholder:text-zinc-500";
+import { nativeInputClassName } from "@/components/ui/form-input";
+
+/** Shared field styles for create / edit modals (native inputs). */
+export const formModalInputClass = cn("mt-2", nativeInputClassName);
 
 export const formModalLabelClass =
   "text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400";
@@ -27,7 +33,7 @@ type FormModalProps = {
   busy?: boolean;
   /** Stack above other modals (e.g. nested “Add client”). */
   elevated?: boolean;
-  maxWidth?: "md" | "lg";
+  maxWidth?: "md" | "lg" | "split" | "splitWide";
   titleId?: string;
   children: ReactNode;
 };
@@ -67,11 +73,99 @@ export function FormModal({
         {...(titleId ? { "aria-labelledby": titleId } : {})}
         className={cn(
           "relative z-10 flex max-h-[min(90dvh,calc(100dvh-2rem))] w-full flex-col overflow-hidden rounded-3xl border border-zinc-200/80 bg-white shadow-2xl shadow-zinc-900/10 ring-1 ring-zinc-900/5 dark:border-zinc-800 dark:bg-zinc-950 dark:ring-white/5",
-          maxWidth === "md" ? "max-w-md" : "max-w-lg",
+          maxWidth === "md"
+            ? "max-w-md"
+            : maxWidth === "split"
+              ? "max-w-4xl"
+              : maxWidth === "splitWide"
+                ? "max-w-6xl"
+                : "max-w-lg",
         )}
       >
         {children}
       </div>
+    </div>
+  );
+}
+
+/** Two-column modal: form column + full-bleed image on the right (sm+). */
+export function FormModalSplitLayout({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col sm:flex-row sm:items-stretch">{children}</div>
+  );
+}
+
+export function FormModalSplitMain({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-white dark:bg-zinc-950">
+      {children}
+    </div>
+  );
+}
+
+type FormModalImageAsideProps = {
+  src: string;
+  /** Overrides default `object-center` (e.g. `object-[30%_center]` to show more of the left). */
+  imagePositionClassName?: string;
+};
+
+export function FormModalImageAside({ src, imagePositionClassName }: FormModalImageAsideProps) {
+  return (
+    <aside
+      className={cn(
+        "relative hidden min-h-0 shrink-0 overflow-hidden bg-[#fbf7ef]",
+        "sm:block sm:w-1/2 sm:self-stretch",
+      )}
+      aria-hidden
+    >
+      <Image
+        src={src}
+        alt=""
+        fill
+        className={cn("object-cover", imagePositionClassName ?? "object-center")}
+        sizes="(min-width: 640px) 50vw, 0px"
+        priority
+      />
+    </aside>
+  );
+}
+
+type FormModalOnboardingFooterProps = {
+  formId: string;
+  onCancel: () => void;
+  submitLabel: string;
+  busyLabel?: string;
+  busy?: boolean;
+  submitDisabled?: boolean;
+};
+
+export function FormModalOnboardingFooter({
+  formId,
+  onCancel,
+  submitLabel,
+  busyLabel = "Saving…",
+  busy,
+  submitDisabled,
+}: FormModalOnboardingFooterProps) {
+  return (
+    <div className="shrink-0 space-y-2 border-t border-neutral-100 bg-white px-6 py-4 dark:border-zinc-800 dark:bg-zinc-950">
+      <button
+        type="submit"
+        form={formId}
+        disabled={busy || submitDisabled}
+        aria-busy={busy}
+        className={onboardingPrimaryButtonClassName}
+      >
+        {busy ? busyLabel : submitLabel}
+      </button>
+      <button
+        type="button"
+        onClick={onCancel}
+        disabled={busy}
+        className="w-full py-1 text-[11px] font-medium text-neutral-500 transition hover:text-neutral-800 disabled:opacity-50 dark:text-zinc-400 dark:hover:text-zinc-200"
+      >
+        Cancel
+      </button>
     </div>
   );
 }
@@ -163,7 +257,12 @@ export function FormModalSection({
       )}
     >
       {title ? (
-        <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+        <p
+          className={cn(
+            "font-medium uppercase tracking-[0.18em] text-neutral-400",
+            variant === "plain" ? "text-[10px]" : "text-[11px] font-semibold tracking-wider text-zinc-400 dark:text-zinc-500",
+          )}
+        >
           {title}
         </p>
       ) : null}
@@ -182,6 +281,8 @@ type FormFieldProps = {
   children: ReactNode;
   /** Row layout for label + inline action (e.g. Add client). */
   action?: ReactNode;
+  /** Match onboarding label + control spacing. */
+  appearance?: "default" | "onboarding";
 };
 
 export function FormField({
@@ -193,23 +294,29 @@ export function FormField({
   hint,
   children,
   action,
+  appearance = "default",
 }: FormFieldProps) {
+  const labelClass =
+    appearance === "onboarding" ? onboardingLabelClass : formModalLabelClass;
+
   const labelEl = (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5",
-        formModalLabelClass,
-        action && "mb-2",
+        appearance === "onboarding"
+          ? "inline-flex items-center gap-1"
+          : "inline-flex items-center gap-1.5",
+        labelClass,
       )}
     >
       {Icon ? <Icon className="h-3.5 w-3.5 text-zinc-400" aria-hidden /> : null}
       {label}
       {required ? (
-        <span className="text-red-500 normal-case" aria-hidden>
+        <span className={appearance === "onboarding" ? "text-red-500 normal-case" : "text-red-500 normal-case"} aria-hidden>
+          {" "}
           *
         </span>
       ) : null}
-      {optional ? (
+      {optional && appearance !== "onboarding" ? (
         <span className="font-normal normal-case text-zinc-400">(optional)</span>
       ) : null}
     </span>
@@ -218,7 +325,12 @@ export function FormField({
   return (
     <label className="block" htmlFor={htmlFor}>
       {action ? (
-        <span className="flex flex-wrap items-center justify-between gap-2">
+        <span
+          className={cn(
+            "flex flex-wrap items-center justify-between gap-x-3 gap-y-2",
+            appearance === "onboarding" ? "mb-3" : "mb-2.5",
+          )}
+        >
           {labelEl}
           {action}
         </span>
